@@ -1,4 +1,4 @@
-# ethos-tools — simulation
+# Ethos Tools — simulation
 
 ## `run_wasm.js`
 

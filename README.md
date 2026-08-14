@@ -1,4 +1,4 @@
-# ethos-tools
+# Ethos Tools
 
 A collection of tools and utilities built around [FrSky Ethos](https://www.frsky-rc.com/), covering areas such as simulation, audio, translations, and more.
 

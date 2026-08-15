@@ -52,7 +52,6 @@ node run_wasm.js X20S_FCC/X20S_FCC.js
 ```
 
 Mount a real models directory and run a Lua macro with a 10s timeout:
-
 ```text
-node run_wasm.js X20S_FCC/X20S_FCC.js --root-directory . --macro macros/macro.lua --macro-timeout 10000
+node run_wasm.js X20S_FCC/X20S_FCC.js --root-directory . --macro USER:/macros/x20s.lua --macro-timeout 10000
 ```

@@ -92,6 +92,8 @@ async function main() {
 
   Module.ccall('start', null, [], [])
 
+  await new Promise((resolve) => setTimeout(resolve, 500))
+
   if (opts.macro) {
     await runMacro(Module, opts.macro, opts.macroTimeout)
   }

@@ -55,6 +55,93 @@ PRESERVED_TOP_LEVEL = {"contributing"}
 
 BULLET_RE = re.compile(r"^(\s*)[*-]\s+\[([^\]]+)\]\(([^)]+)\)\s*$")
 
+# Top-level chapters nested under one synthetic parent section instead of
+# staying their own top-level nav entries -- purely a SUMMARY.md
+# restructuring (the underlying chapter files/folders are untouched, so
+# every image/cross-reference path inside them, already correct for their
+# original location, stays valid). Needed because mkdocs-material's
+# navigation.tabs (or, now, navigation.sections -- see mkdocs.yml) doesn't
+# scale to the real manual's ~20 top-level chapters the way the old,
+# invented nav's ~12 did -- confirmed live: it overflowed the tab bar.
+#
+# Locale-keyed because each locale's own .odt produces its own
+# (differently-titled, differently-slugged) chapters -- only "en" is
+# populated so far; German/Italian/Spanish's own equivalent groupings are
+# part of the still-pending Phase 2 work (see this module's docstring).
+#
+# Modeled directly on the old ethos-manual/french tree's own SUMMARY.md,
+# which already solved this exact problem the same way (one "Layouts"
+# section grouping all 8 per-radio pages) -- not a new invention.
+REGROUP_SECTIONS: dict[str, list[dict]] = {
+    "en": [
+        {
+            "title": "Radio Layouts",
+            "path": "radio-layouts/index.md",
+            # Matches ethos-manual/french/radio-layouts/index.md's own
+            # landing page -- a bare title, no body prose, purely
+            # navigational scaffolding, not manual content.
+            "landing_content": "# Radio Layouts\n",
+            "chapter_folders": [
+                "x20-x20s-layouts", "x20-pro-layout", "x20-pro-aw-layout",
+                "x20r-rs-layout", "x18-x18se-layout", "xe-xes-xe-rs-layouts",
+                "x14-x14rs", "twin-xlite",
+            ],
+        },
+    ],
+}
+
+
+def apply_regroup(summary_text: str, sections: list[dict], output_dir: Path) -> str:
+    """Nests each configured group of top-level chapters (matched by their
+    folder name) under one new synthetic parent bullet, and writes that
+    parent's own (minimal, non-manual-content) landing page into
+    output_dir -- see REGROUP_SECTIONS above."""
+    lines = summary_text.split("\n")
+
+    for section in sections:
+        folders = set(section["chapter_folders"])
+        remaining: list[str] = []
+        matched: list[str] = []
+        found: set[str] = set()
+        insert_at: int | None = None
+        i = 0
+        while i < len(lines):
+            m = BULLET_RE.match(lines[i])
+            folder = m.group(3).split("/")[0] if m and len(m.group(1)) == 0 else None
+            if folder in folders:
+                if insert_at is None:
+                    insert_at = len(remaining)
+                found.add(folder)
+                end = i + 1
+                while end < len(lines):
+                    nxt = BULLET_RE.match(lines[end])
+                    if nxt and len(nxt.group(1)) == 0:
+                        break
+                    end += 1
+                matched.extend(("    " + line if line.strip() else line) for line in lines[i:end])
+                i = end
+            else:
+                remaining.append(lines[i])
+                i += 1
+
+        missing = folders - found
+        if missing:
+            print(f"NOTE: expected chapter(s) not found to group under '{section['title']}' "
+                  f"(.odt structure may have changed -- check REGROUP_SECTIONS in this script): "
+                  f"{sorted(missing)}")
+        if not matched:
+            lines = remaining
+            continue
+
+        parent_line = f"* [{section['title']}]({section['path']})"
+        lines = remaining[:insert_at] + [parent_line] + matched + remaining[insert_at:]
+
+        landing_path = output_dir / section["path"]
+        landing_path.parent.mkdir(parents=True, exist_ok=True)
+        landing_path.write_text(section["landing_content"], encoding="utf-8")
+
+    return "\n".join(lines)
+
 
 def find_preserved_summary_block(summary_text: str, top_level_title: str) -> str | None:
     """Extracts one top-level section's own bullet line plus every indented
@@ -109,6 +196,12 @@ def sync_locale(locale: str, ethos_manual: Path, ethos_manual_rework: Path, keep
     print(f"\n=== Converting {odt_path.name} ===")
     run_conversion(ethos_manual, odt_path, conversion_dir)
 
+    new_summary_text = (conversion_dir / "SUMMARY.md").read_text(encoding="utf-8").rstrip("\n")
+    regroup_sections = REGROUP_SECTIONS.get(locale, [])
+    if regroup_sections:
+        print(f"\n=== Regrouping {[s['title'] for s in regroup_sections]} ===")
+        new_summary_text = apply_regroup(new_summary_text, regroup_sections, conversion_dir)
+
     print(f"\n=== Replacing docs/{locale}/ (preserving {sorted(PRESERVED_TOP_LEVEL)}) ===")
     docs_root.mkdir(parents=True, exist_ok=True)
     for entry in list(docs_root.iterdir()):
@@ -127,8 +220,6 @@ def sync_locale(locale: str, ethos_manual: Path, ethos_manual_rework: Path, keep
             shutil.copytree(entry, dest)
         else:
             shutil.copy2(entry, dest)
-
-    new_summary_text = (conversion_dir / "SUMMARY.md").read_text(encoding="utf-8").rstrip("\n")
     preserved_blocks = []
     for title in sorted(PRESERVED_TOP_LEVEL):
         # PRESERVED_TOP_LEVEL is a directory-name set (lowercase, matches

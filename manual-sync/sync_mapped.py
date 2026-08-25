@@ -26,6 +26,7 @@ Only "en" has a PAGE_MAP right now -- see page_map.py.
 from __future__ import annotations
 
 import argparse
+import posixpath
 import re
 import shutil
 import sys
@@ -38,7 +39,100 @@ from sync import BULLET_RE, LOCALE_ODT, run_conversion  # noqa: E402
 
 HEADING_RE = re.compile(r"^(#{1,6})(\s+\S.*)$")
 FENCE_RE = re.compile(r"^\s*```")
-ASSET_REF_RE = re.compile(r"\]\(\.\./assets/([^)]+)\)")
+# Markdown link/image targets, e.g. "[Edit model](../model-setup/edit-model.md)"
+# or "![alt](../assets/x.png)" -- (is-image, link text, link target).
+LINK_RE = re.compile(r"(!?)\[([^\]]*)\]\(([^)\s]+)\)")
+
+
+def build_real_to_target_map(page_map: dict) -> dict[str, str]:
+    """real source path (relative to conversion_dir) -> target path
+    (relative to docs_root), covering every entry PAGE_MAP places
+    somewhere. Used by rewrite_internal_links() to fix up a copied page's
+    own cross-references to *other* real chapters PAGE_MAP also moved --
+    those still point at the real chapter's original relative path
+    (e.g. "../configure-screens/index.md"), which no longer exists once
+    that chapter's content lands at its target path (e.g.
+    "../displays/index.md") instead."""
+    m: dict[str, str] = {}
+    for target_rel, real_rel in page_map.get("swap", {}).items():
+        m[real_rel] = target_rel
+    for target_rel, real_rels in page_map.get("concat", {}).items():
+        for real_rel in real_rels:
+            m[real_rel] = target_rel
+    for section_path, spec in page_map.get("expand_children", {}).items():
+        landing_source = spec.get("landing_source")
+        if landing_source and landing_source != "auto":
+            m[landing_source] = section_path
+        for _title, target_child_rel, real_source_rel in spec["children"]:
+            m[real_source_rel] = target_child_rel
+    for _section_path, child_specs in page_map.get("append_children", {}).items():
+        for _title, target_child_rel, real_source_rel in child_specs:
+            m[real_source_rel] = target_child_rel
+    return m
+
+
+def rewrite_internal_links(content: str, real_rel: str, target_rel: str, real_to_target: dict[str, str]) -> str:
+    """Rewrites a copied page's own relative links that point at another
+    real chapter PAGE_MAP also relocated, so they point at that chapter's
+    *target* path instead. Links to assets, external URLs, bare anchors,
+    or any real page PAGE_MAP doesn't know about are left untouched
+    (asset links already stay valid unrewritten -- see
+    copy_referenced_assets; a link to a real page outside PAGE_MAP has no
+    target to point at, so rewriting it would just break it a different
+    way -- left as a real, pre-existing dead link instead, same as this
+    sync's other known-deferred issues)."""
+    real_dir = posixpath.dirname(real_rel)
+    target_dir = posixpath.dirname(target_rel)
+
+    def repl(m: re.Match) -> str:
+        bang, text, link = m.group(1), m.group(2), m.group(3)
+        if link.startswith(("http://", "https://", "mailto:", "#")) or "assets/" in link:
+            return m.group(0)
+        path_part, sep, anchor = link.partition("#")
+        if not path_part:
+            return m.group(0)
+        resolved = posixpath.normpath(posixpath.join(real_dir, path_part))
+        new_target = real_to_target.get(resolved)
+        if not new_target:
+            return m.group(0)
+        new_link = posixpath.relpath(new_target, target_dir)
+        if sep:
+            new_link += sep + anchor
+        return f"{bang}[{text}]({new_link})"
+
+    return LINK_RE.sub(repl, content)
+
+
+def strip_dangling_links(content: str, target_rel: str, docs_root: Path) -> tuple[str, int]:
+    """Final safety net, run after every page PAGE_MAP places: a copied
+    page can still contain a relative link to *another real chapter that
+    PAGE_MAP deliberately never mapped anywhere* (rewrite_internal_links
+    only fixes links to chapters PAGE_MAP does place somewhere). Such a
+    link has no valid target on either side (real or target), so leave it
+    dead is not an option under mkdocs build --strict -- instead drop the
+    link syntax and keep just its visible text, mirroring how a print
+    manual would read the same cross-reference with no live link at all.
+    Never touches asset links or bare #anchor-only links (anchor
+    mismatches are a separate, non-strict-breaking, already-documented
+    known issue -- see this sync's own commit/PR notes)."""
+    target_dir = posixpath.dirname(target_rel)
+    count = [0]
+
+    def repl(m: re.Match) -> str:
+        bang, text, link = m.group(1), m.group(2), m.group(3)
+        if link.startswith(("http://", "https://", "mailto:", "#")) or "assets/" in link:
+            return m.group(0)
+        path_part, _sep, _anchor = link.partition("#")
+        if not path_part:
+            return m.group(0)
+        resolved = posixpath.normpath(posixpath.join(target_dir, path_part))
+        if (docs_root / resolved).exists():
+            return m.group(0)
+        count[0] += 1
+        return text
+
+    new_content = LINK_RE.sub(repl, content)
+    return new_content, count[0]
 
 
 def demote_headings(text: str, levels: int = 1) -> str:
@@ -63,41 +157,58 @@ def demote_headings(text: str, levels: int = 1) -> str:
     return "\n".join(out_lines)
 
 
-def build_concat_content(conversion_dir: Path, real_rels: list[str]) -> str:
-    """Concatenates several real pages into one target page's content --
-    the first page's heading levels are kept as-is (its H1 becomes the
-    target page's own H1); every page after it is demoted one level so
-    it reads as a sub-section instead of a second top-level heading."""
-    parts = []
-    for i, rel in enumerate(real_rels):
-        text = (conversion_dir / rel).read_text(encoding="utf-8").rstrip("\n")
-        if i > 0:
-            text = demote_headings(text, levels=1)
-        parts.append(text)
-    return "\n\n".join(parts) + "\n"
-
-
-def copy_referenced_assets(content: str, conversion_dir: Path, docs_root: Path) -> int:
+def copy_referenced_assets(content: str, real_rel: str, conversion_dir: Path, docs_root: Path) -> int:
     """Copies only the specific assets a just-written page actually
-    references (parsed straight out of its own `](../assets/...)` links)
-    into docs_root/assets/, instead of merging the real conversion's
-    entire assets/ tree wholesale. Deliberate: target's assets/ already
-    holds images for pages this script never maps (How-To Guides,
-    Reference, Contributing, ...), some coincidentally same-named as
-    real's own auto-generated asset names -- a blanket merge silently
-    overwrote those with unrelated real images the first time this was
-    tried. Returns how many files were copied."""
+    references (parsed straight out of its own links, resolved relative
+    to the *source* page's own original directory -- real_rel -- so this
+    works whether the link reads "../assets/x.png" (any non-root page) or
+    plain "assets/x.png" (a page originally at the conversion root, e.g.
+    index.md)) into docs_root/assets/, instead of merging the real
+    conversion's entire assets/ tree wholesale. Deliberate: target's
+    assets/ already holds images for pages this script never maps
+    (How-To Guides, Reference, Contributing, ...), some coincidentally
+    same-named as real's own auto-generated asset names -- a blanket
+    merge silently overwrote those with unrelated real images the first
+    time this was tried. Returns how many files were copied."""
+    real_dir = posixpath.dirname(real_rel)
     n = 0
-    for m in ASSET_REF_RE.finditer(content):
-        rel = m.group(1)
-        src = conversion_dir / "assets" / rel
+    for m in LINK_RE.finditer(content):
+        link = m.group(3)
+        path_part = link.partition("#")[0]
+        if not path_part:
+            continue
+        resolved = posixpath.normpath(posixpath.join(real_dir, path_part))
+        if not (resolved == "assets" or resolved.startswith("assets/")):
+            continue
+        src = conversion_dir / resolved
         if not src.exists():
             continue
-        dest = docs_root / "assets" / rel
+        dest = docs_root / resolved
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
         n += 1
     return n
+
+
+def build_concat_content(conversion_dir: Path, real_rels: list[str], target_rel: str,
+                          real_to_target: dict[str, str], docs_root: Path, asset_counter: list[int]) -> str:
+    """Concatenates several real pages into one target page's content --
+    the first page's heading levels are kept as-is (its H1 becomes the
+    target page's own H1); every page after it is demoted one level so
+    it reads as a sub-section instead of a second top-level heading.
+    Each source page's own internal links/assets are rewritten/copied
+    individually (see rewrite_internal_links, copy_referenced_assets)
+    before joining, since they were written relative to that source's
+    own original directory."""
+    parts = []
+    for i, rel in enumerate(real_rels):
+        text = (conversion_dir / rel).read_text(encoding="utf-8").rstrip("\n")
+        asset_counter[0] += copy_referenced_assets(text, rel, conversion_dir, docs_root)
+        text = rewrite_internal_links(text, rel, target_rel, real_to_target)
+        if i > 0:
+            text = demote_headings(text, levels=1)
+        parts.append(text)
+    return "\n\n".join(parts) + "\n"
 
 
 def find_section_line_range(lines: list[str], section_path: str) -> tuple[int, int] | None:
@@ -119,12 +230,18 @@ def find_section_line_range(lines: list[str], section_path: str) -> tuple[int, i
     return None
 
 
-def place_page(src: Path, dest: Path, conversion_dir: Path, docs_root: Path, asset_counter: list[int]) -> None:
-    """Copies one real page to its target path and pulls in just the
-    assets it references (see copy_referenced_assets)."""
+def place_page(src: Path, real_rel: str, target_rel: str, conversion_dir: Path, docs_root: Path,
+                real_to_target: dict[str, str], asset_counter: list[int]) -> None:
+    """Copies one real page to its target path, rewriting its own
+    internal links to other relocated real chapters (see
+    rewrite_internal_links) and pulling in just the assets it references
+    (see copy_referenced_assets)."""
+    dest = docs_root / target_rel
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dest)
-    asset_counter[0] += copy_referenced_assets(dest.read_text(encoding="utf-8"), conversion_dir, docs_root)
+    content = src.read_text(encoding="utf-8")
+    asset_counter[0] += copy_referenced_assets(content, real_rel, conversion_dir, docs_root)
+    content = rewrite_internal_links(content, real_rel, target_rel, real_to_target)
+    dest.write_text(content, encoding="utf-8")
 
 
 def auto_landing_content(section_title: str, section_path: str, children: list[tuple[str, str, str]]) -> str:
@@ -153,6 +270,8 @@ def apply_page_map(locale: str, conversion_dir: Path, docs_root: Path) -> None:
         raise SystemExit(f"No PAGE_MAP configured for locale '{locale}' -- see page_map.py.")
 
     asset_count = [0]  # mutable counter, threaded through place_page()
+    real_to_target = build_real_to_target_map(page_map)
+    touched: set[str] = set()  # every target_rel PAGE_MAP wrote, for the dangling-link pass at the end
 
     swaps = page_map.get("swap", {})
     print(f"\n=== Applying {len(swaps)} 1:1 content swap(s) ===")
@@ -161,7 +280,8 @@ def apply_page_map(locale: str, conversion_dir: Path, docs_root: Path) -> None:
         if not src.exists():
             print(f"NOTE: swap source missing, left as-is: {target_rel} <- {real_rel}")
             continue
-        place_page(src, docs_root / target_rel, conversion_dir, docs_root, asset_count)
+        place_page(src, real_rel, target_rel, conversion_dir, docs_root, real_to_target, asset_count)
+        touched.add(target_rel)
 
     concats = page_map.get("concat", {})
     print(f"\n=== Applying {len(concats)} concatenation(s) ===")
@@ -172,9 +292,9 @@ def apply_page_map(locale: str, conversion_dir: Path, docs_root: Path) -> None:
             continue
         dest = docs_root / target_rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        content = build_concat_content(conversion_dir, real_rels)
+        content = build_concat_content(conversion_dir, real_rels, target_rel, real_to_target, docs_root, asset_count)
         dest.write_text(content, encoding="utf-8")
-        asset_count[0] += copy_referenced_assets(content, conversion_dir, docs_root)
+        touched.add(target_rel)
 
     summary_path = docs_root / "SUMMARY.md"
     lines = summary_path.read_text(encoding="utf-8").split("\n")
@@ -195,16 +315,19 @@ def apply_page_map(locale: str, conversion_dir: Path, docs_root: Path) -> None:
             if not src.exists():
                 print(f"NOTE: child source missing, skipped: {target_child_rel} <- {real_source_rel}")
                 continue
-            place_page(src, docs_root / target_child_rel, conversion_dir, docs_root, asset_count)
+            place_page(src, real_source_rel, target_child_rel, conversion_dir, docs_root, real_to_target, asset_count)
+            touched.add(target_child_rel)
             new_children.append(f"    * [{title}]({target_child_rel})")
 
         if landing_source == "auto":
             content = auto_landing_content(section_title, section_path, spec["children"])
             (docs_root / section_path).write_text(content, encoding="utf-8")
+            touched.add(section_path)
         elif landing_source:
             src = conversion_dir / landing_source
             if src.exists():
-                place_page(src, docs_root / section_path, conversion_dir, docs_root, asset_count)
+                place_page(src, landing_source, section_path, conversion_dir, docs_root, real_to_target, asset_count)
+                touched.add(section_path)
             else:
                 print(f"NOTE: landing source missing for {section_path}: {landing_source}")
         # landing_source omitted/None entirely: section's own existing
@@ -220,19 +343,45 @@ def apply_page_map(locale: str, conversion_dir: Path, docs_root: Path) -> None:
         if rng is None:
             print(f"NOTE: section not found in SUMMARY.md, skipped: {section_path}")
             continue
-        _, end = rng
+        start, end = rng
+        # Idempotency: a page this same entry already added on a previous
+        # sync run is still one of this section's children (append_children
+        # never removes anything, unlike expand_children) -- re-running
+        # against that output must add its *content* fresh (below) but
+        # must not add its SUMMARY.md bullet a second time.
+        existing_paths = {
+            em.group(3) for line in lines[start + 1:end] if (em := BULLET_RE.match(line))
+        }
         new_children = []
         for title, target_child_rel, real_source_rel in child_specs:
             src = conversion_dir / real_source_rel
             if not src.exists():
                 print(f"NOTE: child source missing, skipped: {target_child_rel} <- {real_source_rel}")
                 continue
-            place_page(src, docs_root / target_child_rel, conversion_dir, docs_root, asset_count)
-            new_children.append(f"    * [{title}]({target_child_rel})")
+            place_page(src, real_source_rel, target_child_rel, conversion_dir, docs_root, real_to_target, asset_count)
+            touched.add(target_child_rel)
+            if target_child_rel not in existing_paths:
+                new_children.append(f"    * [{title}]({target_child_rel})")
         lines = lines[:end] + new_children + lines[end:]
 
     summary_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"\n=== Copied {asset_count[0]} referenced asset(s) into docs/{locale}/assets/ ===")
+
+    print(f"\n=== Checking {len(touched)} placed page(s) for dangling internal links ===")
+    stripped_total = 0
+    for target_rel in sorted(touched):
+        path = docs_root / target_rel
+        content = path.read_text(encoding="utf-8")
+        new_content, n = strip_dangling_links(content, target_rel, docs_root)
+        if n:
+            path.write_text(new_content, encoding="utf-8")
+            stripped_total += n
+            print(f"NOTE: stripped {n} dangling link(s) in {target_rel} (pointed at a real page "
+                  f"PAGE_MAP doesn't place anywhere -- kept the link's own text, dropped the link itself)")
+    if stripped_total:
+        print(f"{stripped_total} dangling link(s) stripped in total -- see NOTEs above for exactly where; "
+              f"if any of those point at real content worth mapping properly, that's a PAGE_MAP gap to fix, "
+              f"not something this pass should paper over silently.")
 
 
 def sync_locale_mapped(locale: str, ethos_manual: Path, ethos_manual_rework: Path, keep_output: bool) -> None:

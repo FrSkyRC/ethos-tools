@@ -107,20 +107,24 @@ def strip_dangling_links(content: str, target_rel: str, docs_root: Path) -> tupl
     """Final safety net, run after every page PAGE_MAP places: a copied
     page can still contain a relative link to *another real chapter that
     PAGE_MAP deliberately never mapped anywhere* (rewrite_internal_links
-    only fixes links to chapters PAGE_MAP does place somewhere). Such a
-    link has no valid target on either side (real or target), so leave it
-    dead is not an option under mkdocs build --strict -- instead drop the
-    link syntax and keep just its visible text, mirroring how a print
-    manual would read the same cross-reference with no live link at all.
-    Never touches asset links or bare #anchor-only links (anchor
-    mismatches are a separate, non-strict-breaking, already-documented
-    known issue -- see this sync's own commit/PR notes)."""
+    only fixes links to chapters PAGE_MAP does place somewhere), or an
+    image link whose source asset odt_to_markdown.py itself already
+    reported as missing on disk (a translator's linked-image file that
+    genuinely isn't present -- happens for some German images; see this
+    sync's own commit/PR notes). Either way there's no valid target, so
+    leaving it dead isn't an option under mkdocs build --strict --
+    instead drop the link syntax and keep just its visible text (empty,
+    for an image with no alt text, which simply removes the broken
+    image reference) -- mirrors how a print manual would read the same
+    cross-reference with no live link/image at all. Never touches bare
+    #anchor-only links (anchor mismatches are a separate,
+    non-strict-breaking, already-documented known issue)."""
     target_dir = posixpath.dirname(target_rel)
     count = [0]
 
     def repl(m: re.Match) -> str:
         bang, text, link = m.group(1), m.group(2), m.group(3)
-        if link.startswith(("http://", "https://", "mailto:", "#")) or "assets/" in link:
+        if link.startswith(("http://", "https://", "mailto:", "#")):
             return m.group(0)
         path_part, _sep, _anchor = link.partition("#")
         if not path_part:
@@ -264,11 +268,19 @@ def auto_landing_content(section_title: str, section_path: str, children: list[t
     return "\n".join(lines) + "\n"
 
 
-def apply_page_map(locale: str, conversion_dir: Path, docs_root: Path) -> None:
-    page_map = PAGE_MAP.get(locale)
-    if not page_map:
-        raise SystemExit(f"No PAGE_MAP configured for locale '{locale}' -- see page_map.py.")
+def apply_page_map(locale: str, page_map: dict, conversion_dir: Path, docs_root: Path,
+                    manage_nav: bool = True) -> None:
+    """Places every PAGE_MAP entry's real content at its target path.
 
+    manage_nav controls whether docs/<locale>/SUMMARY.md itself gets
+    edited (expand_children replacing a section's children,
+    append_children adding new ones). True for English, which OWNS the
+    shared nav structure every other locale's pages inherit via
+    mkdocs-static-i18n's folder mode -- for a non-English locale, the
+    exact same target paths already exist in nav (added when English's
+    SUMMARY.md was edited) and docs/<locale>/ deliberately has no
+    SUMMARY.md of its own to edit; only the *content* at those paths
+    needs placing (see sync_locale_derived)."""
     asset_count = [0]  # mutable counter, threaded through place_page()
     real_to_target = build_real_to_target_map(page_map)
     touched: set[str] = set()  # every target_rel PAGE_MAP wrote, for the dangling-link pass at the end
@@ -296,19 +308,23 @@ def apply_page_map(locale: str, conversion_dir: Path, docs_root: Path) -> None:
         dest.write_text(content, encoding="utf-8")
         touched.add(target_rel)
 
-    summary_path = docs_root / "SUMMARY.md"
-    lines = summary_path.read_text(encoding="utf-8").split("\n")
+    if manage_nav:
+        summary_path = docs_root / "SUMMARY.md"
+        lines = summary_path.read_text(encoding="utf-8").split("\n")
+    else:
+        summary_path = None
+        lines = []
 
     expand = page_map.get("expand_children", {})
     print(f"\n=== Applying {len(expand)} section child-replacement(s) ===")
     for section_path, spec in expand.items():
-        rng = find_section_line_range(lines, section_path)
-        if rng is None:
-            print(f"NOTE: section not found in SUMMARY.md, skipped: {section_path}")
-            continue
-        start, end = rng
+        if manage_nav:
+            rng = find_section_line_range(lines, section_path)
+            if rng is None:
+                print(f"NOTE: section not found in SUMMARY.md, skipped: {section_path}")
+                continue
+            start, end = rng
         landing_source = spec.get("landing_source")
-        section_title = BULLET_RE.match(lines[start]).group(2)
         new_children = []
         for title, target_child_rel, real_source_rel in spec["children"]:
             src = conversion_dir / real_source_rel
@@ -317,10 +333,21 @@ def apply_page_map(locale: str, conversion_dir: Path, docs_root: Path) -> None:
                 continue
             place_page(src, real_source_rel, target_child_rel, conversion_dir, docs_root, real_to_target, asset_count)
             touched.add(target_child_rel)
-            new_children.append(f"    * [{title}]({target_child_rel})")
+            if manage_nav:
+                new_children.append(f"    * [{title}]({target_child_rel})")
 
         if landing_source == "auto":
-            content = auto_landing_content(section_title, section_path, spec["children"])
+            # Regenerated for every locale (title stays in English --
+            # structural scaffolding, not translated prose; see
+            # page_map.py's own comment on this). Deliberately NOT
+            # skipped for non-English locales: leaving a non-English
+            # locale's *previous* landing page in place here would keep
+            # whatever stale content/links it had before this section's
+            # children were replaced -- the exact bug this auto-
+            # regeneration exists to prevent in the first place (see
+            # this module's/PR's commit history for the English case
+            # that surfaced it).
+            content = auto_landing_content(spec["title"], section_path, spec["children"])
             (docs_root / section_path).write_text(content, encoding="utf-8")
             touched.add(section_path)
         elif landing_source:
@@ -334,25 +361,28 @@ def apply_page_map(locale: str, conversion_dir: Path, docs_root: Path) -> None:
         # landing page is left untouched (only valid when nothing about
         # it depends on the specific children list, unlike "auto").
 
-        lines = lines[:start + 1] + new_children + lines[end:]
+        if manage_nav:
+            lines = lines[:start + 1] + new_children + lines[end:]
 
     append = page_map.get("append_children", {})
     print(f"\n=== Applying {len(append)} section child-addition(s) ===")
     for section_path, child_specs in append.items():
-        rng = find_section_line_range(lines, section_path)
-        if rng is None:
-            print(f"NOTE: section not found in SUMMARY.md, skipped: {section_path}")
-            continue
-        start, end = rng
-        # Idempotency: a page this same entry already added on a previous
-        # sync run is still one of this section's children (append_children
-        # never removes anything, unlike expand_children) -- re-running
-        # against that output must add its *content* fresh (below) but
-        # must not add its SUMMARY.md bullet a second time.
-        existing_paths = {
-            em.group(3) for line in lines[start + 1:end] if (em := BULLET_RE.match(line))
-        }
-        new_children = []
+        if manage_nav:
+            rng = find_section_line_range(lines, section_path)
+            if rng is None:
+                print(f"NOTE: section not found in SUMMARY.md, skipped: {section_path}")
+                continue
+            start, end = rng
+            # Idempotency: a page this same entry already added on a
+            # previous sync run is still one of this section's children
+            # (append_children never removes anything, unlike
+            # expand_children) -- re-running against that output must add
+            # its *content* fresh (below) but must not add its
+            # SUMMARY.md bullet a second time.
+            existing_paths = {
+                em.group(3) for line in lines[start + 1:end] if (em := BULLET_RE.match(line))
+            }
+            new_children = []
         for title, target_child_rel, real_source_rel in child_specs:
             src = conversion_dir / real_source_rel
             if not src.exists():
@@ -360,11 +390,13 @@ def apply_page_map(locale: str, conversion_dir: Path, docs_root: Path) -> None:
                 continue
             place_page(src, real_source_rel, target_child_rel, conversion_dir, docs_root, real_to_target, asset_count)
             touched.add(target_child_rel)
-            if target_child_rel not in existing_paths:
+            if manage_nav and target_child_rel not in existing_paths:
                 new_children.append(f"    * [{title}]({target_child_rel})")
-        lines = lines[:end] + new_children + lines[end:]
+        if manage_nav:
+            lines = lines[:end] + new_children + lines[end:]
 
-    summary_path.write_text("\n".join(lines), encoding="utf-8")
+    if manage_nav:
+        summary_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"\n=== Copied {asset_count[0]} referenced asset(s) into docs/{locale}/assets/ ===")
 
     print(f"\n=== Checking {len(touched)} placed page(s) for dangling internal links ===")
@@ -382,6 +414,120 @@ def apply_page_map(locale: str, conversion_dir: Path, docs_root: Path) -> None:
         print(f"{stripped_total} dangling link(s) stripped in total -- see NOTEs above for exactly where; "
               f"if any of those point at real content worth mapping properly, that's a PAGE_MAP gap to fix, "
               f"not something this pass should paper over silently.")
+
+
+def parse_real_summary(path: Path) -> list[dict]:
+    """Parses a raw (real-conversion, not target) SUMMARY.md into ordered
+    top-level chapters, each with its own index_path and an ordered list
+    of its children's paths. Used by build_locale_translation() to line
+    up one locale's real structure against another's, position for
+    position, without caring what either locale's chapter/child is
+    actually *titled* (which this function doesn't even keep)."""
+    lines = path.read_text(encoding="utf-8").split("\n")
+    chapters: list[dict] = []
+    cur: dict | None = None
+    for line in lines:
+        m = BULLET_RE.match(line)
+        if not m:
+            continue
+        indent, _title, target = m.groups()
+        if len(indent) == 0:
+            if target == "index.md":
+                continue  # Home
+            cur = {"index_path": target, "children": []}
+            chapters.append(cur)
+        elif cur is not None:
+            cur["children"].append(target)
+    return chapters
+
+
+def build_locale_translation(en_chapters: list[dict], locale_chapters: list[dict]) -> dict[str, str]:
+    """en real path -> locale real path, matched purely by position
+    (chapter index, then child index) -- see this module's docstring and
+    the PR/commit notes for why this is safe: English's and a locale's
+    real top-level chapter count/order have been confirmed (for de/es,
+    after fixing the image-only-heading bug in odt_to_markdown.py) to
+    match exactly. Raises if the top-level count doesn't match -- that's
+    real structural drift needing a human look, not something to guess
+    past silently."""
+    if len(en_chapters) != len(locale_chapters):
+        raise SystemExit(
+            f"Structural mismatch: English's real structure has {len(en_chapters)} top-level "
+            f"chapters, this locale's has {len(locale_chapters)} -- can't derive a positional "
+            f"PAGE_MAP safely from a mismatched chapter count. This needs a human look (likely "
+            f"the .odt's own structure has drifted, or has its own conversion quirk like the "
+            f"image-only-heading bug already fixed for Spanish) -- not a guess.")
+    # parse_real_summary() deliberately excludes the Home bullet (it's not
+    # a real chapter), but PAGE_MAP["en"]'s swap entry for the target
+    # Home page ("index.md": "index.md") still references it by that
+    # same literal path in every locale -- map it directly rather than
+    # positionally.
+    translation: dict[str, str] = {"index.md": "index.md"}
+    for en_ch, loc_ch in zip(en_chapters, locale_chapters):
+        translation[en_ch["index_path"]] = loc_ch["index_path"]
+        for j, en_child in enumerate(en_ch["children"]):
+            if j < len(loc_ch["children"]):
+                translation[en_child] = loc_ch["children"][j]
+            # else: this locale's chapter has fewer children than
+            # English's at this position -- any PAGE_MAP entry
+            # referencing en_child reports its own NOTE (see
+            # derive_locale_page_map) rather than guessing a target.
+    return translation
+
+
+def derive_locale_page_map(en_page_map: dict, translation: dict[str, str]) -> dict:
+    """Rebuilds English's PAGE_MAP for another locale by translating
+    every real-path reference through translation (see
+    build_locale_translation) -- target paths are untouched (shared
+    across every locale via mkdocs-static-i18n's folder mode); only
+    which *real* file each target draws from changes. An entry whose
+    real path has no positional counterpart in this locale (its chapter
+    has fewer children at that position) is dropped with a NOTE --
+    real, honest incompleteness, not invented content filling the gap."""
+    def tr(real_rel: str, context: str) -> str | None:
+        t = translation.get(real_rel)
+        if t is None:
+            print(f"NOTE: no positional counterpart for real path '{real_rel}' ({context}) -- "
+                  f"this locale's real structure doesn't have a chapter/child at English's "
+                  f"position. Skipped.")
+        return t
+
+    out: dict = {"swap": {}, "concat": {}, "expand_children": {}, "append_children": {}}
+
+    for target_rel, real_rel in en_page_map.get("swap", {}).items():
+        t = tr(real_rel, f"swap -> {target_rel}")
+        if t:
+            out["swap"][target_rel] = t
+
+    for target_rel, real_rels in en_page_map.get("concat", {}).items():
+        translated = [t for r in real_rels if (t := tr(r, f"concat -> {target_rel}"))]
+        if translated:
+            out["concat"][target_rel] = translated
+
+    for section_path, spec in en_page_map.get("expand_children", {}).items():
+        landing_source = spec.get("landing_source")
+        new_landing = landing_source if landing_source == "auto" else (
+            tr(landing_source, f"expand_children landing -> {section_path}") if landing_source else None)
+        new_children = []
+        for title, target_child_rel, real_source_rel in spec["children"]:
+            t = tr(real_source_rel, f"expand_children child -> {target_child_rel}")
+            if t:
+                new_children.append((title, target_child_rel, t))
+        if new_children:
+            out["expand_children"][section_path] = {
+                "title": spec["title"], "landing_source": new_landing, "children": new_children,
+            }
+
+    for section_path, child_specs in en_page_map.get("append_children", {}).items():
+        new_children = []
+        for title, target_child_rel, real_source_rel in child_specs:
+            t = tr(real_source_rel, f"append_children -> {target_child_rel}")
+            if t:
+                new_children.append((title, target_child_rel, t))
+        if new_children:
+            out["append_children"][section_path] = new_children
+
+    return out
 
 
 def sync_locale_mapped(locale: str, ethos_manual: Path, ethos_manual_rework: Path, keep_output: bool) -> None:
@@ -405,7 +551,7 @@ def sync_locale_mapped(locale: str, ethos_manual: Path, ethos_manual_rework: Pat
     run_conversion(ethos_manual, odt_path, conversion_dir)
 
     print(f"\n=== Mapping real content into docs/{locale}/ (existing nav structure preserved) ===")
-    apply_page_map(locale, conversion_dir, docs_root)
+    apply_page_map(locale, PAGE_MAP[locale], conversion_dir, docs_root, manage_nav=True)
 
     if not keep_output:
         shutil.rmtree(conversion_dir, ignore_errors=True)
@@ -415,9 +561,60 @@ def sync_locale_mapped(locale: str, ethos_manual: Path, ethos_manual_rework: Pat
           "Reference, Contributing, ...) are untouched by design, not an oversight.")
 
 
+def sync_locale_derived(locale: str, ethos_manual: Path, ethos_manual_rework: Path, keep_output: bool) -> None:
+    """Non-English locale path: no PAGE_MAP is hand-written for these --
+    it's derived from PAGE_MAP["en"] by matching this locale's real
+    structure against English's real structure position for position
+    (see build_locale_translation/derive_locale_page_map). Converts BOTH
+    English's and this locale's .odt in the same run so both real
+    structures are fresh and consistent with each other."""
+    if locale == "en":
+        raise SystemExit("sync_locale_derived is for non-English locales; use sync_locale_mapped for en.")
+    if locale not in LOCALE_ODT:
+        raise SystemExit(f"No .odt configured for locale '{locale}' -- see LOCALE_ODT in sync.py.")
+
+    en_odt = ethos_manual / LOCALE_ODT["en"]
+    loc_odt = ethos_manual / LOCALE_ODT[locale]
+    for p in (en_odt, loc_odt):
+        if not p.exists():
+            raise SystemExit(f"Configured .odt not found: {p} (see LOCALE_ODT in sync.py).")
+
+    docs_root = ethos_manual_rework / "docs" / locale
+    if not docs_root.exists():
+        raise SystemExit(f"No docs/{locale}/ in ethos-manual-rework -- this locale isn't set up in "
+                          f"mkdocs.yml/docs/ yet, sync_mapped.py doesn't create a new locale from scratch.")
+
+    keep_dir = lambda odt_key, suffix: ethos_manual / LOCALE_ODT[odt_key].split("/")[0] / f"markdown-mapped-{suffix}"
+    en_dir = Path(tempfile.mkdtemp(prefix="manual-sync-mapped-en-")) if not keep_output else keep_dir("en", "en")
+    loc_dir = Path(tempfile.mkdtemp(prefix=f"manual-sync-mapped-{locale}-")) if not keep_output else \
+        keep_dir(locale, locale)
+
+    print(f"\n=== Converting {en_odt.name} (English, for position reference) ===")
+    run_conversion(ethos_manual, en_odt, en_dir)
+    print(f"\n=== Converting {loc_odt.name} ===")
+    run_conversion(ethos_manual, loc_odt, loc_dir)
+
+    en_chapters = parse_real_summary(en_dir / "SUMMARY.md")
+    loc_chapters = parse_real_summary(loc_dir / "SUMMARY.md")
+    translation = build_locale_translation(en_chapters, loc_chapters)
+    locale_page_map = derive_locale_page_map(PAGE_MAP["en"], translation)
+
+    print(f"\n=== Mapping real content into docs/{locale}/ (shared nav structure, content only) ===")
+    apply_page_map(locale, locale_page_map, loc_dir, docs_root, manage_nav=False)
+
+    if not keep_output:
+        shutil.rmtree(en_dir, ignore_errors=True)
+        shutil.rmtree(loc_dir, ignore_errors=True)
+
+    print(f"\nMapped {locale}: {loc_odt.name} -> {docs_root} (derived from PAGE_MAP['en'] positionally)")
+    print("Review the diff before committing -- docs/{locale}/SUMMARY.md doesn't exist and wasn't "
+          "created; this locale's nav is entirely inherited from docs/en/SUMMARY.md + mkdocs.yml's "
+          "nav_translations, per mkdocs-static-i18n's folder mode.".format(locale=locale))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("locale", choices=sorted(PAGE_MAP), help="which locale to map")
+    parser.add_argument("locale", choices=sorted(LOCALE_ODT), help="which locale to map")
     parser.add_argument("--ethos-manual", type=Path, default=Path(__file__).resolve().parents[2] / "ethos-manual",
                          help="path to the ethos-manual checkout (default: sibling of this repo)")
     parser.add_argument("--ethos-manual-rework", type=Path,
@@ -425,10 +622,15 @@ def main() -> None:
                          help="path to the ethos-manual-rework checkout (default: sibling of this repo)")
     parser.add_argument("--keep-conversion-output", action="store_true", dest="keep_output",
                          help="leave odt_to_markdown.py's raw output on disk afterward "
-                              "(under <locale-dir>/markdown-mapped/) instead of using a temp dir")
+                              "(under <locale-dir>/markdown-mapped*/) instead of using a temp dir")
     args = parser.parse_args()
 
-    sync_locale_mapped(args.locale, args.ethos_manual.resolve(), args.ethos_manual_rework.resolve(), args.keep_output)
+    ethos_manual = args.ethos_manual.resolve()
+    ethos_manual_rework = args.ethos_manual_rework.resolve()
+    if args.locale == "en":
+        sync_locale_mapped(args.locale, ethos_manual, ethos_manual_rework, args.keep_output)
+    else:
+        sync_locale_derived(args.locale, ethos_manual, ethos_manual_rework, args.keep_output)
 
 
 if __name__ == "__main__":

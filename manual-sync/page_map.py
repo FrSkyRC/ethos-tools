@@ -146,6 +146,13 @@ PAGE_MAP: dict[str, dict] = {
         # (its hand-written landing/intro) is left untouched.
         "expand_children": {
             "displays/index.md": {
+                # Only used for "auto" landing_source (see radio-notes
+                # below) -- a real landing_source's own content supplies
+                # the page's title, so this is unused here, but kept for
+                # every entry so derive_locale_page_map()/auto_landing_
+                # content() never need to fall back to reading English's
+                # own SUMMARY.md (which doesn't exist for other locales).
+                "title": "Displays",
                 "landing_source": "configure-screens/index.md",
                 "children": [
                     ("Configuring the Main Screen", "displays/configuring-the-main-screen.md",
@@ -166,6 +173,11 @@ PAGE_MAP: dict[str, dict] = {
                 # the children below instead (see auto_landing_content in
                 # sync_mapped.py). Keeps this page from drifting out of
                 # sync with whatever the real per-radio chapter list is.
+                # Used for every locale (title stays in English -- it's
+                # structural scaffolding, not translated prose, same
+                # status as the bare "# Radio Layouts" landing page
+                # sync.py's own REGROUP_SECTIONS mode writes).
+                "title": "Radio Notes",
                 "landing_source": "auto",
                 "children": [
                     ("X20/X20S", "radio-notes/x20-x20s.md", "x20-x20s-layouts/index.md"),

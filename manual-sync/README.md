@@ -1,10 +1,50 @@
 # Ethos Tools — manual-sync
 
-## `sync.py`
+Two scripts, two different ways of getting real manual content out of
+[`ethos-manual`](https://github.com/robthomson/ethos-manual)'s `.odt` master files and into
+[`ethos-manual-rework`](https://github.com/robthomson/ethos-manual-rework)'s `docs/<locale>/` tree, both via
+`ethos-manual/forge/odt_to_markdown.py`. Both are meant to be re-run by hand each time a new `.odt` revision is
+ready, for as long as the `.odt` stays the source of truth — once writers/translators work directly in
+`ethos-manual-rework` (via its editor tool or plain git), neither script's job is needed anymore.
 
-Syncs real manual content from [`ethos-manual`](https://github.com/robthomson/ethos-manual)'s `.odt` master files into [`ethos-manual-rework`](https://github.com/robthomson/ethos-manual-rework)'s `docs/<locale>/` tree, via `ethos-manual/forge/odt_to_markdown.py`.
+## `sync_mapped.py` — current approach for `en`
 
-`ethos-manual-rework/docs/en/` started out written from scratch rather than sourced from the real manual — this replaces that with the real thing, mechanically converted, never inventing or paraphrasing text. Meant to be re-run by hand each time a new `.odt` revision is ready, for as long as the `.odt` stays the source of truth — once writers/translators work directly in `ethos-manual-rework` (via its editor tool or plain git), this script's job is done.
+`sync.py` (below) replaces the site's nav wholesale with the `.odt`'s own chapter breakdown. Tried first for
+English, and rejected on live review: the real manual's own organization doesn't make a good site IA on its own
+(too many top-level chapters, uneven granularity). `ethos-manual-rework/main`'s hand-designed nav
+(`docs/en/SUMMARY.md`) is kept as-is; `sync_mapped.py` instead maps real, never-invented `.odt` text into that
+*existing* structure, driven by `page_map.py`'s `PAGE_MAP` config (target path -> real source path(s)).
+
+```bash
+python sync_mapped.py en
+```
+
+`PAGE_MAP` has four shapes, matching how each part of the existing nav lines up against the real structure —
+see `page_map.py`'s own docstring/comments for the full mapping and the reasoning behind each entry:
+
+- **swap** — target page's own title/path kept, content replaced wholesale by one real page.
+- **concat** — several real sub-pages folded into one target page (heading levels demoted below the first
+  page's own H1), for target sections that are intentionally flatter than the real manual's own breakdown.
+- **expand_children** — a target section's children fully replaced by new real per-topic pages; the section's
+  landing page is either sourced from a matching real chapter intro, or (`"landing_source": "auto"`)
+  auto-generated as a bare heading + link list when no single real chapter introduces the whole group (e.g.
+  "Radio Notes" grouping 8 separate real per-radio chapters) — regenerated fresh every run so it can't drift
+  out of sync with the real children list.
+- **append_children** — real content with no target page yet, added alongside a section's existing children.
+
+Pages not listed in `PAGE_MAP` at all (How-To Guides, Reference, Contributing) are left completely untouched —
+by design, not an oversight; there's no real `.odt` chapter behind them.
+
+Assets are copied selectively: only the specific images a mapped page actually references (parsed out of its own
+`](../assets/...)` links), not the whole conversion's `assets/` tree — a blanket merge would silently overwrite
+images belonging to pages this script never maps, some of which coincidentally share a filename with the real
+conversion's own auto-generated asset names.
+
+Only `en` has a `PAGE_MAP` right now. `de`/`it`/`es` need their own once their `.odt` structures are reconciled
+against `en`'s target nav — likely harder than `en`'s, since (per the `sync.py` section below) their own manuals
+don't necessarily organize chapters identically to English's.
+
+## `sync.py` — mirrors the `.odt`'s own structure
 
 ### Prerequisites
 
@@ -33,10 +73,10 @@ Nothing is committed or pushed — review the resulting `git diff` in `ethos-man
 
 ### Locale status
 
-| Locale | Real `.odt` source | Synced end to end |
+| Locale | Real `.odt` source | Synced |
 | --- | --- | --- |
-| `en` | Yes | Yes |
-| `de` | Yes | Not yet — needs the same-relative-path reconciliation below worked out first |
+| `en` | Yes | Yes, via `sync_mapped.py` + `PAGE_MAP` (see above) — not via this script's own `REGROUP_SECTIONS` mirroring, which was tried first and rejected |
+| `de` | Yes | Not yet — needs its own `PAGE_MAP` reconciled against `en`'s target nav first |
 | `it` | Yes | Not yet |
 | `es` | Yes | Not yet |
 | everything else | No | Not applicable — no real source to sync from |

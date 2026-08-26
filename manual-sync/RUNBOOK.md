@@ -149,6 +149,32 @@ begin with, image extraction is much less reliable). Don't attempt to
 extraction is even viable; treat it as a separate, scoped investigation
 of its own, not an assumed extension of this runbook.
 
+**Investigated once already, confirmed not viable via standard text-layer
+extraction** — `1.6`'s own German/Italian/Spanish PDFs (`pypdf` and
+`pymupdf` both tried): every accented character (ü/ä/ö/ß, à/è/ò, á/í/ñ)
+comes out as `�` — corrupted, not missing, confirmed in both the page
+body text *and* the PDF's own embedded outline/bookmark titles, across
+all three locales' PDFs. This is a font-encoding problem baked into how
+these particular PDFs were originally exported (a known issue with older
+LibreOffice/OpenOffice PDF exports lacking a proper Unicode character
+map), not a library bug — there's no clean channel to fall back to for
+these specific files. Don't re-attempt plain text extraction on them;
+it will silently produce *wrong* characters, not just missing ones,
+for exactly the words that matter most in these languages.
+
+The only path that would actually work is OCR (render each page as an
+image, recognize text from the rendered glyphs instead of the broken
+internal encoding) — genuinely a different, heavier pipeline than
+anything else in this runbook (no font-size/style metadata to detect
+headings from, no reliable outline to cross-reference the way
+`resolve_toc_fallback_headings` does, its own real accuracy risk on
+technical UI terminology). Not attempted as of this writing — a
+deliberate stop, not an oversight (see the relevant PR/commit history on
+`ethos-manual-rework`'s `1.6` branch for the decision). If a locale ever
+gets a real `.odt` source (or someone re-exports the PDF with a working
+font encoding), that changes the situation entirely and this whole
+runbook applies normally again.
+
 ## 4. Verify before committing — every single time
 
 Real, hard-won lessons, not optional:

@@ -34,8 +34,27 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from page_map import PAGE_MAP  # noqa: E402
-from sync import BULLET_RE, LOCALE_ODT, run_conversion  # noqa: E402
+import page_map as page_map_26_1  # noqa: E402
+import page_map_1_6  # noqa: E402
+from sync import BULLET_RE, LOCALE_ODT as LOCALE_ODT_26_1, run_conversion  # noqa: E402
+
+# Everything below (LOCALE_ODT/PAGE_MAP lookups) is scoped by --branch --
+# ethos-manual and ethos-manual-rework are the *same* repos across branches,
+# just checked out to a different one locally; this script doesn't do the
+# checkout itself, but does need to know which .odt filenames and which
+# PAGE_MAP apply once you have. Add a new branch's entry here (and its own
+# page_map_<branch>.py, following page_map_1_6.py's shape) when bringing
+# another branch onto real content -- see RUNBOOK.md.
+BRANCH_LOCALE_ODT = {
+    "26.1": LOCALE_ODT_26_1,
+    "1.6": {
+        "en": "english/docs/[EN] Ethos User Manual 1.6.3rev1.odt",
+    },
+}
+BRANCH_PAGE_MAPS = {
+    "26.1": page_map_26_1.PAGE_MAP,
+    "1.6": page_map_1_6.PAGE_MAP,
+}
 
 HEADING_RE = re.compile(r"^(#{1,6})(\s+\S.*)$")
 FENCE_RE = re.compile(r"^\s*```")
@@ -530,14 +549,15 @@ def derive_locale_page_map(en_page_map: dict, translation: dict[str, str]) -> di
     return out
 
 
-def sync_locale_mapped(locale: str, ethos_manual: Path, ethos_manual_rework: Path, keep_output: bool) -> None:
-    if locale not in LOCALE_ODT:
-        raise SystemExit(f"No .odt configured for locale '{locale}' -- see LOCALE_ODT in sync.py.")
+def sync_locale_mapped(locale: str, ethos_manual: Path, ethos_manual_rework: Path, keep_output: bool,
+                        locale_odt: dict, page_map: dict) -> None:
+    if locale not in locale_odt:
+        raise SystemExit(f"No .odt configured for locale '{locale}' on this branch -- see LOCALE_ODT.")
 
-    odt_path = ethos_manual / LOCALE_ODT[locale]
+    odt_path = ethos_manual / locale_odt[locale]
     if not odt_path.exists():
         raise SystemExit(f"Configured .odt not found: {odt_path}\n"
-                          f"(LOCALE_ODT['{locale}'] in sync.py may need bumping to a newer revision's filename.)")
+                          f"(LOCALE_ODT['{locale}'] may need bumping to a newer revision's filename.)")
 
     docs_root = ethos_manual_rework / "docs" / locale
     if not (docs_root / "SUMMARY.md").exists():
@@ -545,13 +565,13 @@ def sync_locale_mapped(locale: str, ethos_manual: Path, ethos_manual_rework: Pat
                           f"into an *existing* nav, it doesn't create one from scratch.")
 
     conversion_dir = Path(tempfile.mkdtemp(prefix="manual-sync-mapped-")) if not keep_output else \
-        ethos_manual / LOCALE_ODT[locale].split("/")[0] / "markdown-mapped"
+        ethos_manual / locale_odt[locale].split("/")[0] / "markdown-mapped"
 
     print(f"\n=== Converting {odt_path.name} ===")
     run_conversion(ethos_manual, odt_path, conversion_dir)
 
     print(f"\n=== Mapping real content into docs/{locale}/ (existing nav structure preserved) ===")
-    apply_page_map(locale, PAGE_MAP[locale], conversion_dir, docs_root, manage_nav=True)
+    apply_page_map(locale, page_map[locale], conversion_dir, docs_root, manage_nav=True)
 
     if not keep_output:
         shutil.rmtree(conversion_dir, ignore_errors=True)
@@ -561,7 +581,8 @@ def sync_locale_mapped(locale: str, ethos_manual: Path, ethos_manual_rework: Pat
           "Reference, Contributing, ...) are untouched by design, not an oversight.")
 
 
-def sync_locale_derived(locale: str, ethos_manual: Path, ethos_manual_rework: Path, keep_output: bool) -> None:
+def sync_locale_derived(locale: str, ethos_manual: Path, ethos_manual_rework: Path, keep_output: bool,
+                         locale_odt: dict, page_map: dict) -> None:
     """Non-English locale path: no PAGE_MAP is hand-written for these --
     it's derived from PAGE_MAP["en"] by matching this locale's real
     structure against English's real structure position for position
@@ -570,21 +591,23 @@ def sync_locale_derived(locale: str, ethos_manual: Path, ethos_manual_rework: Pa
     structures are fresh and consistent with each other."""
     if locale == "en":
         raise SystemExit("sync_locale_derived is for non-English locales; use sync_locale_mapped for en.")
-    if locale not in LOCALE_ODT:
-        raise SystemExit(f"No .odt configured for locale '{locale}' -- see LOCALE_ODT in sync.py.")
+    if locale not in locale_odt:
+        raise SystemExit(f"No .odt configured for locale '{locale}' on this branch -- see LOCALE_ODT.")
 
-    en_odt = ethos_manual / LOCALE_ODT["en"]
-    loc_odt = ethos_manual / LOCALE_ODT[locale]
+    en_odt = ethos_manual / locale_odt["en"]
+    loc_odt = ethos_manual / locale_odt[locale]
     for p in (en_odt, loc_odt):
         if not p.exists():
-            raise SystemExit(f"Configured .odt not found: {p} (see LOCALE_ODT in sync.py).")
+            raise SystemExit(f"Configured .odt not found: {p}.")
 
     docs_root = ethos_manual_rework / "docs" / locale
     if not docs_root.exists():
         raise SystemExit(f"No docs/{locale}/ in ethos-manual-rework -- this locale isn't set up in "
                           f"mkdocs.yml/docs/ yet, sync_mapped.py doesn't create a new locale from scratch.")
 
-    keep_dir = lambda odt_key, suffix: ethos_manual / LOCALE_ODT[odt_key].split("/")[0] / f"markdown-mapped-{suffix}"
+    def keep_dir(odt_key: str, suffix: str) -> Path:
+        return ethos_manual / locale_odt[odt_key].split("/")[0] / f"markdown-mapped-{suffix}"
+
     en_dir = Path(tempfile.mkdtemp(prefix="manual-sync-mapped-en-")) if not keep_output else keep_dir("en", "en")
     loc_dir = Path(tempfile.mkdtemp(prefix=f"manual-sync-mapped-{locale}-")) if not keep_output else \
         keep_dir(locale, locale)
@@ -597,7 +620,7 @@ def sync_locale_derived(locale: str, ethos_manual: Path, ethos_manual_rework: Pa
     en_chapters = parse_real_summary(en_dir / "SUMMARY.md")
     loc_chapters = parse_real_summary(loc_dir / "SUMMARY.md")
     translation = build_locale_translation(en_chapters, loc_chapters)
-    locale_page_map = derive_locale_page_map(PAGE_MAP["en"], translation)
+    locale_page_map = derive_locale_page_map(page_map["en"], translation)
 
     print(f"\n=== Mapping real content into docs/{locale}/ (shared nav structure, content only) ===")
     apply_page_map(locale, locale_page_map, loc_dir, docs_root, manage_nav=False)
@@ -614,7 +637,12 @@ def sync_locale_derived(locale: str, ethos_manual: Path, ethos_manual_rework: Pa
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("locale", choices=sorted(LOCALE_ODT), help="which locale to map")
+    parser.add_argument("locale", help="which locale to map (valid choices depend on --branch)")
+    parser.add_argument("--branch", default="26.1", choices=sorted(BRANCH_LOCALE_ODT),
+                         help="which ethos-manual/ethos-manual-rework branch this checkout is on "
+                              "(default: 26.1) -- selects which LOCALE_ODT filenames and PAGE_MAP to use; "
+                              "doesn't check out the branch itself, you need to have already done that "
+                              "in both --ethos-manual and --ethos-manual-rework")
     parser.add_argument("--ethos-manual", type=Path, default=Path(__file__).resolve().parents[2] / "ethos-manual",
                          help="path to the ethos-manual checkout (default: sibling of this repo)")
     parser.add_argument("--ethos-manual-rework", type=Path,
@@ -625,12 +653,18 @@ def main() -> None:
                               "(under <locale-dir>/markdown-mapped*/) instead of using a temp dir")
     args = parser.parse_args()
 
+    locale_odt = BRANCH_LOCALE_ODT[args.branch]
+    page_map = BRANCH_PAGE_MAPS[args.branch]
+    if args.locale not in locale_odt:
+        parser.error(f"locale {args.locale!r} has no .odt configured for branch {args.branch!r} "
+                     f"(valid: {sorted(locale_odt)})")
+
     ethos_manual = args.ethos_manual.resolve()
     ethos_manual_rework = args.ethos_manual_rework.resolve()
     if args.locale == "en":
-        sync_locale_mapped(args.locale, ethos_manual, ethos_manual_rework, args.keep_output)
+        sync_locale_mapped(args.locale, ethos_manual, ethos_manual_rework, args.keep_output, locale_odt, page_map)
     else:
-        sync_locale_derived(args.locale, ethos_manual, ethos_manual_rework, args.keep_output)
+        sync_locale_derived(args.locale, ethos_manual, ethos_manual_rework, args.keep_output, locale_odt, page_map)
 
 
 if __name__ == "__main__":

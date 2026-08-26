@@ -1,5 +1,8 @@
 # Ethos Tools — manual-sync
 
+See [`RUNBOOK.md`](RUNBOOK.md) for the step-by-step process (and the pitfalls hit along the way) for bringing a
+branch or locale onto real content — this file documents what each script/flag does, not the order to use them in.
+
 Two scripts, two different ways of getting real manual content out of
 [`ethos-manual`](https://github.com/robthomson/ethos-manual)'s `.odt` master files and into
 [`ethos-manual-rework`](https://github.com/robthomson/ethos-manual-rework)'s `docs/<locale>/` tree, both via

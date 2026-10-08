@@ -1,0 +1,16 @@
+{
+  "name": "ethos-tools",
+  "owner": {
+    "name": "FrSky RC"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for FrSky Ethos development"
+  },
+  "plugins": [
+    {
+      "name": "ethos-simulator",
+      "source": "./simulation",
+      "description": "Navigate FrSky Ethos in its WASM simulator: boot a radio, take screenshots, and drive it with touch, keys, encoder, switches and sticks."
+    }
+  ]
+}

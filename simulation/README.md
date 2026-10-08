@@ -55,3 +55,49 @@ Mount a real models directory and run a Lua macro with a 10s timeout:
 ```text
 node run_wasm.js X20S_FCC/X20S_FCC.js --root-directory . --macro USER:/macros/x20s.lua --macro-timeout 10000
 ```
+
+## `sim_driver.js`
+
+An interactive driver for the same WASM build. `serve` boots the simulator and keeps it running behind a small HTTP server on `127.0.0.1`. Every other invocation is a one-shot client that sends one input or request and prints the JSON result. It is the backend of the [`ethos-navigate`](skills/ethos-navigate/SKILL.md) Claude Code skill (see below).
+
+```text
+node sim_driver.js serve <simulator.js> [--root-directory DIR] [--port N] [--shots-dir DIR]
+node sim_driver.js <command> [args] [--port N]
+```
+
+| Command | Effect |
+| --- | --- |
+| `status` | Simulator state: frame size, switch positions, trims |
+| `screenshot [out.png]` | Save the current screen as PNG |
+| `tap X Y`, `longpress X Y`, `swipe X1 Y1 X2 Y2 [ms]` | Touch input (screen pixels, top-left origin) |
+| `wheel N` | Rotary encoder, N detents |
+| `press KEY [holdMs]`, `keydown KEY`, `keyup KEY` | Keys: `SYS` `MDL` `DISP` `RTN` `PAGE` `ENTER`, or any browser key name |
+| `switch I V`, `fswitch I V`, `analog I V`, `trim I V` | Switches, function switches, analogs, trims |
+| `macro PATH [timeoutMs]` | Run a Lua macro to completion |
+| `wait MS`, `log [n]`, `quit` | Pause, last console lines, stop the simulator |
+
+Input commands wait for the display to settle before returning, so a following `screenshot` shows the result.
+
+Example:
+
+```text
+node sim_driver.js serve X20S_FCC/X20S_FCC.js --root-directory ./radio &
+node sim_driver.js press SYS
+node sim_driver.js screenshot system.png
+node sim_driver.js quit
+```
+
+## Claude Code plugin: `ethos-simulator`
+
+This folder is also a [Claude Code](https://claude.com/claude-code) plugin. Its [`ethos-navigate`](skills/ethos-navigate/SKILL.md) skill teaches Claude to start `sim_driver.js` and operate the radio. Claude takes a screenshot, reads it, taps or presses a key, and repeats. You can then ask things like *"open the Mixes page and show me what it looks like"* or *"check that my widget renders on the X18"*.
+
+Install it from any Claude Code session:
+
+```text
+/plugin marketplace add FrSkyRC/ethos-tools
+/plugin install ethos-simulator@ethos-tools
+```
+
+Inside a clone of this repository, the project settings (`.claude/settings.json`) already list the marketplace, and Claude Code offers to install the plugin when you trust the folder.
+
+Requirements: Node.js 18+ and an Ethos WASM build (`<BOARD>_<PROTOCOL>.js` + `.wasm`). The skill finds builds that the Ethos VS Code extension has already downloaded.

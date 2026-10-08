@@ -5,10 +5,10 @@ description: Drive the FrSky Ethos radio firmware in its WASM simulator — boot
 
 # Navigating Ethos in the WASM simulator
 
-`sim_driver.js` keeps an Ethos simulator running behind a local HTTP server.
+`run_wasm.js --serve` keeps an Ethos simulator running behind a local HTTP server.
 You act on it with one-shot client commands and look at the result with `screenshot` + Read.
 
-The driver ships with this skill: it is `../../sim_driver.js` relative to this skill's base directory
+The script ships with this skill: it is `../../run_wasm.js` relative to this skill's base directory
 (the plugin root). Resolve it to an absolute path once, and use that path wherever this page says `"$DRIVER"`.
 Shell variables don't persist between Bash calls, so write the absolute path into each command.
 Requires Node.js 18+.
@@ -21,7 +21,7 @@ Builds are `<BOARD>_<PROTOCOL>.js` + `.wasm` pairs (e.g. `X20S_FCC`). The Ethos 
 %APPDATA%\Code\User\globalStorage\bsongis.ethos\cache\        (Git Bash: "$APPDATA/Code/User/globalStorage/bsongis.ethos/cache")
 ```
 
-List it to see which boards are available. If the user names a board, use that one; otherwise default to `X20S_FCC`.
+List it to see which boards are available. If the user names a board, use that one. Otherwise use the newest build, by file date. Older builds can crash on `macro` with "table index is out of bounds".
 If nothing is cached, ask the user to run "Ethos: Start" once in VS Code, or to point you at a build.
 
 ## 2. Pick the radio storage (root directory)
@@ -40,7 +40,7 @@ The VS Code extension's per-radio folders are usually `<workspace>/simulator/<BO
 Run in the background (Bash `run_in_background: true`):
 
 ```bash
-node "$DRIVER" serve "<path>/X20S_FCC.js" --root-directory "<radio dir>" --shots-dir "<scratchpad>/shots"
+node "$DRIVER" "<path>/X20S_FCC.js" --serve --root-directory "<radio dir>" --shots-dir "<scratchpad>/shots"
 ```
 
 Then poll until it answers (boot takes a few seconds):
@@ -49,7 +49,7 @@ Then poll until it answers (boot takes a few seconds):
 for i in $(seq 1 30); do node "$DRIVER" status && break; node -e "setTimeout(()=>{},1000)"; done
 ```
 
-`status` returns the screen size, switch positions and trims. Use `--port N` on both serve and client to run several radios at once (default 8765).
+`status` returns the screen size, switch positions and trims. Use `--port N` on both the server and the client commands to run several radios at once (default 8765).
 
 ## 4. The navigation loop
 
@@ -106,6 +106,7 @@ Other boards have different resolutions (X18/Twin X Lite 480×320, X14 640×360.
 
 - SYS / MDL / DISP only jump to their menu from the top level. From inside a settings page they are ignored, even though `press` still returns `"used": true`. Press `RTN` until you're back at Home (or a menu grid), then press the menu key.
 - Don't chain several actions blindly. If one misses (above), the rest land on the wrong screen. Screenshot between steps unless the path was already verified in this session.
+- A radio folder with no models (or no `--root-directory`) boots into the **Create model** wizard, where the menu keys are ignored. Finish or cancel it first.
 - Booting usually shows a **Checklist warning** dialog (throttle, failsafe). Dismiss it with its **OK** button at the bottom right, or with `RTN`.
 - Touch is usually the most direct way in. Use `wheel` + `ENTER` when a target is small or only reachable by focus.
 - Lua errors show up in `log`, not on screen. Check `log` when a widget or tool looks blank.

@@ -6,6 +6,7 @@ Tools and documentation for the Ethos simulator.
 | --- | --- |
 | [Ethos WASM Simulator](wasm_simulator.md) | Reference of the WASM simulator: embedding in a web page or Node.js, exported functions, callbacks, remote control protocol, Lua `simulator` API, macros |
 | [`run_wasm.js`](run_wasm.md) | Node.js runner for the WASM simulator: run it from the command line and drive a Lua macro (tests, CI), or keep it running and operate it interactively (`--serve`) |
+| [`radio_remote.py`](radio_remote.md) | Drive a physical radio over USB with the same remote control protocol: screenshots, keys, trims, touch, rotary encoder, files. Covers the USB HID mode switch, the on-screen accept and the protocol v6 payloads |
 
 ## Claude Code plugin: `ethos-simulator`
 

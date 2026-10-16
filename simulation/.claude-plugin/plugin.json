@@ -1,0 +1,11 @@
+{
+  "name": "ethos-simulator",
+  "version": "0.1.0",
+  "description": "Navigate FrSky Ethos in its WASM simulator: boot a radio, take screenshots, and drive it with touch, keys, encoder, switches and sticks.",
+  "author": {
+    "name": "Rob Thomson"
+  },
+  "homepage": "https://github.com/FrSkyRC/ethos-tools/tree/main/simulation",
+  "repository": "https://github.com/FrSkyRC/ethos-tools",
+  "keywords": ["ethos", "frsky", "simulator", "wasm", "lua"]
+}

@@ -4,12 +4,14 @@ Drives a **physical** Ethos radio from the command line over USB, with the same 
 
 Tested on an X20S running Ethos 26.1.3 (protocol version 6), on Windows.
 
+**Firmware:** remote control of a physical radio needs Ethos 26 from the nightly builds of 2026-10-16 or later.
+
 ## Prerequisites
 
 - Python 3.8+
 - `pyserial` (`pip install pyserial`)
 - `hidapi` (`pip install hidapi`), only for the `mode` command
-- A radio with a firmware supporting the remote control, connected by USB
+- A radio running an Ethos 26 nightly from 2026-10-16 or later, connected by USB
 
 ## Usage
 

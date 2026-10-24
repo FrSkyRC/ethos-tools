@@ -54,11 +54,8 @@ function waitOnce(setHandler, timeoutMs, timeoutMessage) {
 }
 
 async function runMacro(Module, path, timeoutMs) {
-    const pausedPromise = waitOnce((h) => { Module.onDebugEvent = h }, timeoutMs, 'Timed out waiting for the macro to pause at its first line')
-    Module.ccall('startMacro', 'void', ['string', 'boolean'], [path, false])
-    const [source, line] = await pausedPromise
     const endPromise = waitOnce((h) => { Module.onMacroEnd = h }, timeoutMs, 'Timed out waiting for the macro to finish')
-    Module.ccall('resumeMacro', 'void', [], [])
+    Module.ccall('startMacro', 'void', ['string', 'boolean'], [path, false])
     await endPromise
 }
 

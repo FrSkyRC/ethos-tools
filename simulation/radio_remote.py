@@ -9,12 +9,16 @@
       radio screen, then keeps it open behind a small HTTP server on 127.0.0.1.
 
   python radio_remote.py <command> [args...] [--port N]
-      Client: sends one command (screenshot, press, tap...) to a serving instance.
+      Client: sends one command (screenshot, press, touch...) to a serving instance.
+
+The commands have the names of the firmware's remote control functions, as the
+simulator Lua API, the WASM simulator (run_wasm.js) and the ethos-simulator MCP server.
 
 Requires pyserial (serial) and hidapi (hid, only for `mode`). See radio_remote.md.
 """
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -36,9 +40,10 @@ HID_USB_MODE_REQUEST = 0x81
 HID_USB_MODE = {'serial': 0x68, 'storage': 0x69}
 
 SYNC = 0xE7
+PROTOCOL_VERSION = 9  # 9: function switches pressed with PRESS, TOUCH duration
 CMD = {
     'HELLO': 0x01,
-    'PRESS_KEY': 0x10,
+    'PRESS': 0x10,  # PRESS_KEY before the protocol version 9
     'TOUCH': 0x11,
     'SWIPE': 0x12,
     'TURN_ROTARY_ENCODER': 0x13,
@@ -52,6 +57,7 @@ CMD = {
     'WRITE_FILE': 0x32,
     'DELETE_FILE': 0x33,
     'LOAD_MODEL': 0x40,
+    'RELOAD': 0x41,
     'CHANNELS_OUTPUTS': 0x50,
     'TRIMS': 0x51,
 }
@@ -62,29 +68,79 @@ STATUS = {0: 'success', -1: 'unsupported', -2: 'refused', -3: 'invalid argument'
           -4: 'I/O error', -5: 'busy', -6: 'timeout'}
 KEYS = ['SYS', 'MDL', 'DISP', 'PAGE', 'RTN', 'ENTER', 'UP', 'DOWN', 'LEFT', 'RIGHT']
 TRIM_KEY = re.compile(r'T[1-6][+-]')  # trims are pressed as keys: T1+ moves trim 1 up
-DISPLAYS = {'main': 0, 'top': 1, 'glasses': 2}
+FUNCTION_SWITCH = re.compile(r'FS[1-9][0-9]*')
+DISPLAYS = {'MAIN': 0, 'TOP': 1, 'GLASSES': 2}
+LONG_TOUCH_MS = 1000  # from this duration a touch is a long press
+MAX_READ_FILE_SIZE = 512 * 1024  # largest file readFile returns inline (text or base64)
+RELOAD = {'SCRIPTS': 0x01, 'ALL': 0xFF}
 
 # Client commands and the names of their positional arguments
 CLIENT_COMMANDS = {
     'status': [],
     'screenshot': ['out', 'display'],
-    'press': ['key', 'hold'],
-    'tap': ['x', 'y'],
-    'longpress': ['x', 'y'],
+    'press': ['name', 'ms'],
+    'touch': ['x', 'y', 'ms'],
     'swipe': ['x1', 'y1', 'x2', 'y2'],
-    'wheel': ['steps'],
-    'text': ['text'],
-    'fswitch': ['index', 'hold'],
-    'ls': ['path'],
-    'read': ['path', 'out'],
-    'write': ['src', 'path'],
-    'rm': ['path'],
-    'load': ['path'],
-    'trims': [],
-    'log': ['n'],
+    'turnRotaryEncoder': ['steps'],
+    'enterText': ['text'],
+    'loadModel': ['path'],
+    'resetBacklightTimer': [],
+    'getInformation': [],
+    'getLog': ['since'],
+    'listFiles': ['path'],
+    'readFile': ['path', 'out'],
+    'writeFile': ['path', 'src'],
+    'deleteFile': ['path'],
+    'reload': ['what'],
+    'getChannelsOutputs': [],
+    'getTrims': [],
     'wait': ['ms'],
     'quit': [],
 }
+
+
+class LogBuffer:
+    """Numbered lines of the radio log (Lua print() and errors): getLog returns
+    next, to pass back as since to only get the lines added meanwhile."""
+
+    ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+
+    def __init__(self, capacity=1000):
+        self.capacity = capacity
+        self.lines = []
+        self.first = 0  # number of lines[0]
+        self.partial = ''
+        self.lock = threading.Lock()
+
+    def push(self, text):
+        with self.lock:
+            parts = (self.partial + self.ANSI_ESCAPE.sub('', text)).split('\n')
+            self.partial = parts.pop()
+            self.lines += [line.rstrip('\r') for line in parts]
+            if len(self.lines) > self.capacity:
+                dropped = len(self.lines) - self.capacity
+                del self.lines[:dropped]
+                self.first += dropped
+
+    def get(self, since=None):
+        """Without since (or with a number beyond next), the last 50 lines; at most 200 lines."""
+        with self.lock:
+            nxt = self.first + len(self.lines)
+            start = nxt - 50 if since is None or since > nxt else since
+            truncated = since is not None and start < self.first
+            start = max(start, self.first)
+            if nxt - start > 200:
+                start = nxt - 200
+                truncated = since is not None
+            return {'lines': self.lines[start - self.first:], 'next': nxt, 'truncated': truncated}
+
+
+def file_content(data):
+    """Content of a file: text when it is UTF-8, else base64."""
+    try:
+        return {'text': data.decode('utf-8')}
+    except UnicodeDecodeError:
+        return {'base64': base64.b64encode(data).decode('ascii')}
 
 
 def crc16(data):
@@ -244,6 +300,8 @@ class Radio:
         self.refused = False
         self.screens = {}
         self.hello = None
+        self.state = None  # last EVENT_STATE: flight mode, RF active, backlight on
+        self.local_volume = None  # 'RADIO:' on the radios with volumes (local storage and SD card)
         threading.Thread(target=self._read_loop, daemon=True).start()
 
     def _read_loop(self):
@@ -278,6 +336,8 @@ class Radio:
                     self.refused = True
             elif command == EVENT_LOG:
                 self.log(payload.decode('utf-8', 'replace'))
+            elif command == EVENT_STATE and len(payload) >= 3:
+                self.state = {'flightMode': payload[0], 'rfActive': bool(payload[1]), 'backlightOn': bool(payload[2])}
             return
         request = self.pending.get(seq)
         if not request or not command & 0x80 or len(payload) < 2:
@@ -301,7 +361,7 @@ class Radio:
         return request['status'], b''.join(request['chunks'])
 
     def connect(self, accept_timeout):
-        status, data = self.request(CMD['HELLO'], bytes((6,)))
+        status, data = self.request(CMD['HELLO'], bytes((PROTOCOL_VERSION,)))
         if status:
             raise RuntimeError(f'HELLO failed: {STATUS.get(status, status)}')
         r = Reader(data)
@@ -329,38 +389,64 @@ class Radio:
             self.screens.pop(display, None)
         return -4, None
 
-    def press_key(self, key, hold_ms=20):
-        return self.request(CMD['PRESS_KEY'], struct.pack('<I', hold_ms) + cstr(key))[0]
+    def press(self, name, ms=20):
+        """Key, trim or function switch by name. Before the protocol version 9 the
+        function switches have their own command."""
+        if FUNCTION_SWITCH.fullmatch(name) and self.hello['protocol'] < 9:
+            return self.request(CMD['PRESS_FUNCTION_SWITCH'], struct.pack('<I', ms) + cstr(name))[0]
+        return self.request(CMD['PRESS'], struct.pack('<I', ms) + cstr(name))[0]
 
-    def press_function_switch(self, index, hold_ms=20):
-        return self.request(CMD['PRESS_FUNCTION_SWITCH'], struct.pack('<I', hold_ms) + cstr(f'FS{index}'))[0]
-
-    def touch(self, x, y, long_press=False):
-        return self.request(CMD['TOUCH'], struct.pack('<HHB', x, y, 1 if long_press else 0))[0]
+    def touch(self, x, y, ms=20):
+        """Before the protocol version 9 a long press flag instead of the duration."""
+        if self.hello['protocol'] < 9:
+            return self.request(CMD['TOUCH'], struct.pack('<HHB', x, y, 1 if ms >= LONG_TOUCH_MS else 0))[0]
+        return self.request(CMD['TOUCH'], struct.pack('<HHI', x, y, ms))[0]
 
     def swipe(self, x1, y1, x2, y2):
         return self.request(CMD['SWIPE'], struct.pack('<HHHH', x1, y1, x2, y2))[0]
 
-    def wheel(self, steps):
+    def turn_rotary_encoder(self, steps):
         return self.request(CMD['TURN_ROTARY_ENCODER'], struct.pack('<h', steps))[0]
+
+    def reset_backlight_timer(self):
+        return self.request(CMD['RESET_BACKLIGHT_TIMER'])[0]
 
     def enter_text(self, text):
         return self.request(CMD['ENTER_TEXT'], cstr(text))[0]
 
+    def radio_path(self, path):
+        """Radio path from the root: "/x" on the local storage, "SD:/x" on the SD card.
+        "x" is the same as "/x" (Git Bash converts the arguments starting with /)."""
+        if path.upper().startswith('SD:'):
+            return path
+        if self.local_volume is None:
+            self.local_volume = 'RADIO:' if self.request(CMD['LIST_FILES'], cstr('RADIO:/'))[0] == 0 else ''
+        return self.local_volume + '/' + path.lstrip('/')
+
+    def drives(self):
+        drives = [{'name': 'Local', 'path': '/'}]
+        self.radio_path('/')
+        if self.local_volume and self.request(CMD['LIST_FILES'], cstr('SD:/'))[0] == 0:
+            drives.append({'name': 'SD', 'path': 'SD:/'})
+        return drives
+
     def list_files(self, path):
-        status, data = self.request(CMD['LIST_FILES'], cstr(path))
+        status, data = self.request(CMD['LIST_FILES'], cstr(self.radio_path(path)))
         files = []
         r = Reader(data)
         while status == 0 and not r.at_end():
             is_dir = r.u8() != 0
             size = r.u32()
-            files.append({'name': r.string(), 'dir': is_dir, 'size': size})
+            name = r.string()
+            if name not in ('.', '..'):
+                files.append({'name': name, 'isDirectory': is_dir, 'size': size})
         return status, files
 
     def read_file(self, path, offset=0):
-        return self.request(CMD['READ_FILE'], struct.pack('<I', offset) + cstr(path), timeout=60)
+        return self.request(CMD['READ_FILE'], struct.pack('<I', offset) + cstr(self.radio_path(path)), timeout=60)
 
     def write_file(self, path, data):
+        path = self.radio_path(path)
         room = 1024 - len(struct.pack('<I', 0) + cstr(path))
         offset = 0
         while True:
@@ -373,7 +459,26 @@ class Radio:
                 return 0
 
     def delete_file(self, path):
-        return self.request(CMD['DELETE_FILE'], cstr(path))[0]
+        return self.request(CMD['DELETE_FILE'], cstr(self.radio_path(path)))[0]
+
+    def reload(self, what):
+        """Protocol version 7."""
+        return self.request(CMD['RELOAD'], bytes((RELOAD[what],)))[0]
+
+    def channels_outputs(self):
+        """Mixer outputs in %, -1024..1024 = -100..+100%. Since the protocol version 5:
+        count (1), mask of the outputs sent, the outputs of the mask (all of them with full = 1)."""
+        if self.hello['protocol'] < 5:
+            status, data = self.request(CMD['CHANNELS_OUTPUTS'])
+            values = struct.unpack(f'<{len(data) // 2}h', data) if status == 0 else ()
+        else:
+            status, data = self.request(CMD['CHANNELS_OUTPUTS'], bytes((1,)))
+            values = ()
+            if status == 0 and data:
+                count = data[0]
+                mask_len = (count + 7) // 8
+                values = struct.unpack(f'<{count}h', data[1 + mask_len:1 + mask_len + count * 2])
+        return status, [round(v * 1000 / 1024) / 10 for v in values]
 
     def load_model(self, path):
         return self.request(CMD['LOAD_MODEL'], cstr(path))[0]
@@ -408,7 +513,7 @@ class Session:
     def __init__(self, radio, shots_dir):
         self.radio = radio
         self.shots_dir = shots_dir
-        self.lines = []
+        self.log = LogBuffer()
 
     def handle(self, cmd, q):
         radio = self.radio
@@ -418,7 +523,10 @@ class Session:
         if cmd == 'status':
             return {'ok': True, **radio.hello}
         if cmd == 'screenshot':
-            status, image = radio.screenshot(DISPLAYS.get(q.get('display', 'main'), 0))
+            display = q.get('display', 'MAIN').upper()
+            if display not in DISPLAYS:
+                return {'ok': False, 'error': f'Unknown display {display}, expected one of: {", ".join(DISPLAYS)}'}
+            status, image = radio.screenshot(DISPLAYS[display])
             if status:
                 return result(status)
             out = os.path.abspath(q.get('out') or os.path.join(self.shots_dir, f'radio-{int(time.time() * 1000)}.png'))
@@ -427,44 +535,70 @@ class Session:
                 f.write(encode_png(*image))
             return result(0, file=out, width=image[0], height=image[1])
         if cmd == 'press':
-            key = q['key'].upper()
-            if key not in KEYS and not TRIM_KEY.fullmatch(key):
-                return {'ok': False, 'error': f'Unknown key {key}, expected one of: {", ".join(KEYS)}, or a trim T1+ ... T6-'}
-            status = radio.press_key(key, num('hold', 100))
-        elif cmd == 'tap':
-            status = radio.touch(num('x'), num('y'))
-        elif cmd == 'longpress':
-            status = radio.touch(num('x'), num('y'), True)
+            name = q['name'].upper()
+            if name not in KEYS and not TRIM_KEY.fullmatch(name) and not FUNCTION_SWITCH.fullmatch(name):
+                return {'ok': False, 'error': f'Unknown key {name}, expected one of: {", ".join(KEYS)}, a trim T1+ ... T6-, or a function switch FS1, FS2...'}
+            status = radio.press(name, num('ms', 20))
+        elif cmd == 'touch':
+            status = radio.touch(num('x'), num('y'), num('ms', 20))
         elif cmd == 'swipe':
             status = radio.swipe(num('x1'), num('y1'), num('x2'), num('y2'))
-        elif cmd == 'wheel':
-            status = radio.wheel(num('steps', 1))
-        elif cmd == 'text':
-            status = radio.enter_text(q['text'])
-        elif cmd == 'fswitch':
-            status = radio.press_function_switch(num('index'), num('hold', 100))
-        elif cmd == 'ls':
-            status, files = radio.list_files(q.get('path', '/'))
-            return result(status, files=files)
-        elif cmd == 'read':
+        elif cmd == 'turnRotaryEncoder':
+            status = radio.turn_rotary_encoder(num('steps', 1))
+        elif cmd == 'enterText':
+            status = radio.enter_text(q.get('text', ''))
+        elif cmd == 'loadModel':
+            status = radio.load_model(q['path'])
+        elif cmd == 'resetBacklightTimer':
+            status = radio.reset_backlight_timer()
+        elif cmd == 'getInformation':
+            screens = {name: radio.screens[display] for name, display in DISPLAYS.items() if display in radio.screens}
+            return {'ok': True, 'target': 'usb', 'board': radio.hello['board'], 'version': radio.hello['firmware'],
+                    'rfProtocol': radio.hello['region'] or None, 'gitHash': radio.hello['gitHash'],
+                    'protocolVersion': radio.hello['protocol'],
+                    'displays': {name: {'width': image[0], 'height': image[1]} for name, image in screens.items()},
+                    'drives': radio.drives(), 'state': radio.state}
+        elif cmd == 'getLog':
+            return {'ok': True, **self.log.get(int(q['since']) if q.get('since') not in (None, '') else None)}
+        elif cmd == 'listFiles':
+            path = q.get('path') or '/'
+            status, files = radio.list_files(path)
+            return result(status, path=path, files=files)
+        elif cmd == 'readFile':
             status, data = radio.read_file(q['path'])
-            if status == 0 and q.get('out'):
+            if status:
+                return result(status)
+            if q.get('out'):
                 with open(q['out'], 'wb') as f:
                     f.write(data)
-                return result(status, file=os.path.abspath(q['out']), size=len(data))
-            return result(status, size=len(data), text=data.decode('utf-8', 'replace'))
-        elif cmd == 'write':
-            with open(q['src'], 'rb') as f:
-                status = radio.write_file(q['path'], f.read())
-        elif cmd == 'rm':
-            status = radio.delete_file(q['path'])
-        elif cmd == 'load':
-            status = radio.load_model(q['path'])
-        elif cmd == 'trims':
+                return result(status, path=q['path'], size=len(data), file=os.path.abspath(q['out']))
+            if len(data) > MAX_READ_FILE_SIZE:
+                return {'ok': False, 'error': f'{q["path"]} is too big ({len(data)} bytes, {MAX_READ_FILE_SIZE} at most, or give out)'}
+            return result(status, path=q['path'], size=len(data), **file_content(data))
+        elif cmd == 'writeFile':
+            # Content from text, base64 or src (a local file)
+            if q.get('base64') is not None:
+                data = base64.b64decode(q['base64'])
+            elif q.get('src'):
+                with open(q['src'], 'rb') as f:
+                    data = f.read()
+            else:
+                data = str(q.get('text') or '').encode('utf-8')
+            status = radio.write_file(q['path'], data)
+            return result(status, path=q['path'], size=len(data))
+        elif cmd == 'deleteFile':
+            return result(radio.delete_file(q['path']), path=q['path'])
+        elif cmd == 'reload':
+            what = (q.get('what') or 'SCRIPTS').upper()
+            if what not in RELOAD:
+                return {'ok': False, 'error': f'Unknown reload {what}, expected SCRIPTS or ALL'}
+            return result(radio.reload(what))
+        elif cmd == 'getChannelsOutputs':
+            status, outputs = radio.channels_outputs()
+            return result(status, outputs=outputs)
+        elif cmd == 'getTrims':
             status, values = radio.trims()
             return result(status, trims=values)
-        elif cmd == 'log':
-            return {'ok': True, 'lines': self.lines[-num('n', 50):]}
         elif cmd == 'wait':
             time.sleep(num('ms', 500) / 1000)
             return {'ok': True}
@@ -482,25 +616,38 @@ def serve(args):
     com = args.com or find_com_port()
     if not com:
         sys.exit('No Ethos radio serial port found: set its USB mode to Serial (or run `mode serial`)')
-    lines = []
-    radio = Radio(com, lambda text: (lines.append(text), sys.stdout.write(text)))
+    log = LogBuffer()
+    radio = Radio(com, lambda text: (log.push(text), sys.stdout.write(text)))
     print(f'[radio_remote] {com}: accept the connection on the radio screen...', flush=True)
     hello = radio.connect(args.accept_timeout)
     print(f'[radio_remote] {hello["board"]} firmware {hello["firmware"]} connected', flush=True)
     session = Session(radio, os.path.abspath(args.shots_dir))
-    session.lines = lines
+    session.log = log
     lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # pylint: disable=invalid-name
+        def do_POST(self):  # pylint: disable=invalid-name
+            # The arguments too big for the URL (file content), as a JSON object
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
+            except ValueError as e:
+                self.reply({'ok': False, 'error': f'Invalid JSON body: {e}'})
+                return
+            self.do_GET(body)
+
+        def do_GET(self, body=None):  # pylint: disable=invalid-name,arguments-differ
             url = urllib.parse.urlparse(self.path)
             q = dict(urllib.parse.parse_qsl(url.query))
+            q.update(body or {})
             # Commands run one at a time, in arrival order
             with lock:
                 try:
                     body = session.handle(url.path.lstrip('/'), q)
                 except Exception as e:  # pylint: disable=broad-except
                     body = {'ok': False, 'error': str(e)}
+            self.reply(body)
+
+        def reply(self, body):
             data = json.dumps(body).encode()
             self.send_response(200 if body.get('ok') else 400)
             self.send_header('Content-Type', 'application/json')
@@ -517,10 +664,14 @@ def serve(args):
 
 def client(cmd, values, port):
     params = {name: value for name, value in zip(CLIENT_COMMANDS[cmd], values)}
-    if cmd == 'write' and 'src' in params:
-        params['src'] = os.path.abspath(params['src'])
-    if cmd == 'read' and 'out' in params:
-        params['out'] = os.path.abspath(params['out'])
+    # Git Bash (MSYS) turns an argument like /scripts/main.lua into C:/Program Files/Git/scripts/main.lua
+    if os.environ.get('MSYSTEM') and re.match(r'[A-Za-z]:[\\/]', params.get('path', '')):
+        sys.exit(f'Git Bash converted the radio path to {params["path"]}: write it without the leading / '
+                 '(scripts/main.lua), or set MSYS_NO_PATHCONV=1')
+    # Local files, as absolute paths
+    for name in ('src', 'out'):
+        if name in params:
+            params[name] = os.path.abspath(params[name])
     url = f'http://127.0.0.1:{port}/{cmd}?{urllib.parse.urlencode(params)}'
     try:
         with urllib.request.urlopen(url, timeout=120) as res:

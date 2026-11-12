@@ -47,38 +47,47 @@ python radio_remote.py quit
 | Command | Effect |
 | --- | --- |
 | `status` | Board, firmware, region and protocol version from `HELLO` |
-| `screenshot [out.png] [main\|top\|glasses]` | Save a display as PNG (800×480 on the X20S) |
-| `press KEY [holdMs]` | Keys: `SYS` `MDL` `DISP` `PAGE` `RTN` `ENTER` `UP` `DOWN` `LEFT` `RIGHT`. Trims are keys too: `T1+`, `T1-` ... `T6-` |
-| `tap X Y`, `longpress X Y`, `swipe X1 Y1 X2 Y2` | Touch input (screen pixels, top-left origin) |
-| `wheel N` | Rotary encoder, N detents (negative turns the other way) |
-| `text STRING` | Type text in the on-screen keyboard |
-| `fswitch I [holdMs]` | Press function switch `FS<I>` |
-| `ls [PATH]` | List a folder of the radio's storage (`/`, `/models`, `/scripts`...) |
-| `read PATH [out]` | Read a file; saved to `out` when given |
-| `write SRC PATH` | Write the local file `SRC` to `PATH` on the radio |
-| `rm PATH` | Delete a file on the radio |
-| `load PATH` | Load a model file |
-| `trims` | Trim values, -100 to 100 |
-| `log [n]`, `wait MS`, `quit` | Radio log lines, pause, stop the server |
+| `screenshot [out.png] [MAIN\|TOP\|GLASSES]` | Save a display as PNG (800×480 on the X20S) |
+| `press NAME [ms]` | Keys: `SYS` `MDL` `DISP` `PAGE` `RTN` `ENTER` `UP` `DOWN` `LEFT` `RIGHT`, trims `T1+`, `T1-` ... `T6-`, function switches `FS1`, `FS2`...; 20 ms by default, from 540 ms a long press |
+| `touch X Y [ms]`, `swipe X1 Y1 X2 Y2` | Touch input (screen pixels, top-left origin); 20 ms by default, from 1000 ms a long press |
+| `turnRotaryEncoder N` | Rotary encoder, N detents (negative turns the other way) |
+| `enterText TEXT` | Type text in the on-screen keyboard |
+| `loadModel PATH` | Load a model file |
+| `resetBacklightTimer` | Turn the screen back on |
+| `getInformation` | Board, firmware, RF protocol, protocol version, display sizes (once a screenshot was taken), drives, state (flight mode, RF active, backlight on) |
+| `getLog [since]` | Radio log lines: the last 50, or the ones since `next` returned by the previous call |
+| `listFiles [PATH]` | List a folder of the radio's storage (`/`, `/models`, `/scripts`, `SD:/`...) |
+| `readFile PATH [out]` | Read a file: its text (or base64) in the result, or saved to `out` |
+| `writeFile PATH SRC` | Write the local file `SRC` to `PATH` on the radio (over HTTP also `text` or `base64` in a `POST` body) |
+| `deleteFile PATH` | Delete a file on the radio |
+| `reload [SCRIPTS\|ALL]` | Reload the Lua scripts, or everything (protocol version 7) |
+| `getChannelsOutputs` | Mixer outputs, in % |
+| `getTrims` | Trim values, -100 to 100 |
+| `wait MS`, `quit` | Pause, stop the server |
 
-Tried on the radio: `status`, `screenshot`, `press` (keys and trims), `tap`, `wheel`, `ls`, `read`, `write`, `rm`, `trims`. The others use the same payloads as the online simulator but have not been tried yet.
+The input commands have the names and arguments of the firmware's remote control functions, as the `simulator` Lua API, [`run_wasm.js`](run_wasm.md#interactive-mode---serve) and the ethos-simulator MCP server. With a firmware older than the protocol version 9, `press FSn` is sent as `PRESS_FUNCTION_SWITCH` and `touch` as a long press flag (from 1000 ms).
+
+Tried on the radio (protocol version 6, with the previous names of the commands): `status`, `screenshot`, `press` (keys and trims), `touch`, `turnRotaryEncoder`, `listFiles`, `readFile`, `writeFile`, `deleteFile`, `getTrims`. The others, and the payloads of the protocol version 9, have not been tried yet.
+
+In Git Bash, write the radio paths without the leading `/` (`scripts/main.lua`): Git Bash turns an argument starting with `/` into a Windows path, which the client refuses.
 
 Input commands wait 300 ms (`settle`) before returning, so a following `screenshot` shows the result. Every command returns JSON: `{"ok": true, "status": "success", ...}`.
 
 ### Sticks, pots and switches
 
-The protocol table in [wasm_simulator.md](wasm_simulator.md#remote-control) lists `SET_SWITCH` (`0x17`) and `SET_ANALOG` (`0x19`), but the online simulator (<https://ethos-simulator.frsky-rc.com/remote>) never sends them to a physical radio: its switch and stick controls only drive the WASM simulator. They are not in this tool and have not been tried on a radio. Test them with the RF module off: a radio bound to a powered model would move its servos or motor.
+The remote control protocol has no command for them: on a radio they would override the physical controls. `setSwitch` and `setAnalog` only exist in the simulator ([`run_wasm.js`](run_wasm.md#interactive-mode---serve), Lua `simulator.setSwitch()` / `setAnalog()`).
 
 ## Protocol notes for a physical radio
 
-The frame format is the one in [wasm_simulator.md](wasm_simulator.md#remote-control): `0xE7`, command, sequence, 16-bit length, payload, CRC-16/XMODEM, little endian. With protocol version 6 a few payloads differ from that table. These come from the online simulator's client, and all but `CHANNELS_OUTPUTS` were checked on the radio:
+The frame format is the one in [wasm_simulator.md](wasm_simulator.md#remote-control): `0xE7`, command, sequence, 16-bit length, payload, CRC-16/XMODEM, little endian. The payloads used by this tool, checked on the radio with the protocol version 6, except `CHANNELS_OUTPUTS` and the version 9 ones:
 
 | Command | Payload sent | Response |
 | --- | --- | --- |
-| `HELLO` (`0x01`) | version (1) = `6` | version (1), firmware major, minor, revision (1 each), board, region, git hash (strings) |
-| `PRESS_KEY` (`0x10`) | duration ms (4), key name (string) | – |
-| `PRESS_FUNCTION_SWITCH` (`0x16`) | duration ms (4), name `FS1`... (string) | – |
-| `TOUCH` (`0x11`) | x (2), y (2), long press (1) | – |
+| `HELLO` (`0x01`) | version (1) = `9` | version (1), firmware major, minor, revision (1 each), board, region, git hash (strings) |
+| `PRESS` (`0x10`, `PRESS_KEY` before version 9) | duration ms (4), name (string): key, trim, and since version 9 function switch `FS1`... | – |
+| `PRESS_FUNCTION_SWITCH` (`0x16`) | duration ms (4), name `FS1`... (string); used before version 9 | – |
+| `TOUCH` (`0x11`) | x (2), y (2), duration ms (4) since version 9; before: long press (1) | – |
+| `RESET_BACKLIGHT_TIMER` (`0x15`) | – | – |
 | `TURN_ROTARY_ENCODER` (`0x13`) | steps (2, signed) | – |
 | `RESET_INACTIVITY_TIMER` (`0x1B`) | – | `0` once the connection is accepted, `-2` before |
 | `SCREENSHOT` (`0x20`) | display (1), full frame (1) | tiles, see below |
@@ -110,4 +119,4 @@ The radio drops off the bus and enumerates again after a switch, so wait a few s
 
 ## Other ways in
 
-The online simulator at <https://ethos-simulator.frsky-rc.com/remote> has a *Connect Claude* dialog. It gives an MCP URL (`claude mcp add --transport http ethos-simulator https://ethos-simulator.frsky-rc.com/mcp/<token>`) that the FrSky server relays to the open browser tab over `/ws/bridge/<token>`. With a radio connected to that tab by Web Serial, its `screenshot`, `pressKey`, `touch` and `swipe` tools reach the radio. `runMacro`, `getModelJson` and `applyModelJson` work only with the simulator. The same page can share a radio: whoever has it opens a `/remote/<id>` link, and the page that created the link drives it through the server. Both need a browser tab open and go through FrSky's server. `radio_remote.py` is local only.
+The online simulator at <https://ethos-simulator.frsky-rc.com/remote> has a *Connect Claude* dialog. It gives an MCP URL (`claude mcp add --transport http ethos-simulator https://ethos-simulator.frsky-rc.com/mcp/<token>`) that the FrSky server relays to the open browser tab over `/ws/bridge/<token>`. With a radio connected to that tab by Web Serial, its tools reach the radio (`screenshot`, `press`, `touch`, `swipe`, `turnRotaryEncoder`, `enterText`, `loadModel`, `resetBacklightTimer`, `getInformation`, `getLog`, `listFiles`, `readFile`, `writeFile`, `deleteFile`, `reload`, `getChannelsOutputs`), except `startMacro`, `getModelJson` and `applyModelJson`, which work only with the simulator. The same page can share a radio: whoever has it opens a `/remote/<id>` link, and the page that created the link drives it through the server. Both need a browser tab open and go through FrSky's server. `radio_remote.py` is local only.

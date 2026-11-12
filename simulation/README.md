@@ -6,11 +6,12 @@ Tools and documentation for the Ethos simulator.
 | --- | --- |
 | [Ethos WASM Simulator](wasm_simulator.md) | Reference of the WASM simulator: embedding in a web page or Node.js, exported functions, callbacks, remote control protocol, Lua `simulator` API, macros |
 | [`run_wasm.js`](run_wasm.md) | Node.js runner for the WASM simulator: run it from the command line and drive a Lua macro (tests, CI), or keep it running and operate it interactively (`--serve`) |
-| [`radio_remote.py`](radio_remote.md) | Drive a physical radio over USB with the same remote control protocol: screenshots, keys, trims, touch, rotary encoder, files. Covers the USB HID mode switch, the on-screen accept and the protocol v6 payloads |
+| [`radio_remote.py`](radio_remote.md) | Drive a physical radio over USB with the same remote control protocol: screenshots, keys, trims, touch, rotary encoder, files. Covers the USB HID mode switch, the on-screen accept and the protocol payloads (v6 and v9) |
+| [`mcp_server.js`](mcp_server.md) | MCP server of the Claude Code plugin: the tools of the online simulator's MCP server (`press`, `touch`, `screenshot`, `getLog`, files, model JSON...), relayed to the local simulator or radio |
 
 ## Claude Code plugin: `ethos-simulator`
 
-This folder is also a [Claude Code](https://claude.com/claude-code) plugin. Its [`ethos-navigate`](skills/ethos-navigate/SKILL.md) skill teaches Claude to start [`run_wasm.js --serve`](run_wasm.md#interactive-mode---serve) and operate the radio. Claude takes a screenshot, reads it, taps or presses a key, and repeats. You can then ask things like *"open the Mixes page and show me what it looks like"* or *"check that my widget renders on the X18"*.
+This folder is also a [Claude Code](https://claude.com/claude-code) plugin. Its [`ethos-navigate`](skills/ethos-navigate/SKILL.md) skill teaches Claude to start [`run_wasm.js --serve`](run_wasm.md#interactive-mode---serve), and its [MCP server](mcp_server.md) gives Claude tools to operate the simulator, or a radio served by [`radio_remote.py`](radio_remote.md). Claude takes a screenshot, reads it, touches the screen or presses a key, and repeats. You can then ask things like *"open the Mixes page and show me what it looks like"* or *"check that my widget renders on the X18"*.
 
 Install it from any Claude Code session:
 

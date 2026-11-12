@@ -21,7 +21,7 @@ Builds are `<BOARD>_<PROTOCOL>.js` + `.wasm` pairs (e.g. `X20S_FCC`). The Ethos 
 %APPDATA%\Code\User\globalStorage\bsongis.ethos\cache\        (Git Bash: "$APPDATA/Code/User/globalStorage/bsongis.ethos/cache")
 ```
 
-List it to see which boards are available. If the user names a board, use that one. Otherwise use the newest build, by file date. Older builds can crash on `macro` with "table index is out of bounds".
+List it to see which boards are available. If the user names a board, use that one. Otherwise use the newest build, by file date. Older builds can crash on `startMacro` with "table index is out of bounds", and the builds without the remote control exports (`status` returns `"remoteControl": false`) can't run the input commands.
 If nothing is cached, ask the user to run "Ethos: Start" once in VS Code, or to point you at a build.
 
 ## 2. Pick the radio storage (root directory)
@@ -49,7 +49,9 @@ Then poll until it answers (boot takes a few seconds):
 for i in $(seq 1 30); do node "$DRIVER" status && break; node -e "setTimeout(()=>{},1000)"; done
 ```
 
-`status` returns the screen size, switch positions and trims. Use `--port N` on both the server and the client commands to run several radios at once (default 8765).
+`status` returns the displays and their size, switch positions and trims.
+
+Once it serves, the plugin's MCP server (`ethos` tools: `press`, `touch`, `screenshot`, `getLog`...) drives it too: prefer these tools to the command lines below when they are available. They act on a radio served by `radio_remote.py --serve` instead, when there is one. Use `--port N` on both the server and the client commands to run several radios at once (default 8765).
 
 ## 4. The navigation loop
 
@@ -64,25 +66,29 @@ Name screenshots after what they show (`system-menu.png`, `after-ok.png`) so the
 
 | Command | Effect |
 |---|---|
-| `screenshot [out.png]` | Saves the current screen as a PNG and returns its path and size |
-| `tap X Y` | Touch at screen pixel (top-left origin, same coordinates as the screenshot) |
-| `longpress X Y` | 1 s hold: context menus, e.g. on a widget or a model |
-| `swipe X1 Y1 X2 Y2 [ms]` | Drag: scroll lists, change menu page, adjust sliders |
-| `wheel N` | Rotary encoder N detents (+ clockwise / next, − back) |
-| `press KEY [holdMs]` | Press and release a key. Use `holdMs` ≥ 1000 for a long press |
-| `keydown KEY` / `keyup KEY` | Hold or release a key |
-| `switch I V` | Physical switch I to -100 / 0 / 100 (`status` shows the positions) |
-| `fswitch I V` | Function switch I pressed (1) / released (0) |
-| `analog I V` | Stick / pot / slider I value |
-| `trim I V` | Trim button I pressed (1) / released (0) |
-| `macro PATH [timeoutMs]` | Runs a Lua macro (e.g. `USER:/macros/x.lua`) to completion |
+| `screenshot [out.png] [MAIN\|TOP\|GLASSES]` | Saves a display (the main screen by default) as a PNG and returns its path and size |
+| `press NAME [ms]` | Press and release a key, a trim or a function switch (see below). Default 20 ms, from 540 ms a long press |
+| `touch X Y [ms]` | Touch at screen pixel (top-left origin, same coordinates as the screenshot). Default 20 ms, from 1000 ms a long press: context menus, e.g. on a widget or a model |
+| `swipe X1 Y1 X2 Y2` | Drag: scroll lists, change menu page, adjust sliders |
+| `turnRotaryEncoder N` | Rotary encoder N detents (+ clockwise / next, − back) |
+| `enterText TEXT` | Type text in the on-screen keyboard (a text field must be being edited) |
+| `loadModel PATH` | Load a model file, e.g. `/models/model01.bin` |
+| `resetBacklightTimer` | Turn the screen back on (the screenshots are dimmed with the backlight) |
+| `setSwitch I V` | Physical switch I to -100 / 0 / 100 (`status` shows the positions) |
+| `setAnalog I V` | Stick / pot / slider I value, -100 to 100 |
+| `startMacro PATH [timeoutMs]` | Runs a Lua macro (e.g. `USER:/macros/x.lua`) to completion |
+| `getInformation` | Board, firmware version, display sizes |
+| `getLog [since]` | Simulator log: Lua errors and `print` show up here. The result has `next`: `getLog NEXT` then only returns the newer lines |
+| `listFiles [PATH]`, `readFile PATH [out]`, `writeFile PATH SRC`, `deleteFile PATH` | Files of the radio folder, paths from its root. In Git Bash, without the leading `/` (`scripts/main.lua`) |
+| `reload [SCRIPTS\|ALL]` | Reload the Lua scripts after changing one, or everything |
+| `getChannelsOutputs` | Mixer outputs in %, to check a model change |
+| `getModelJson [out.json]`, `applyModelJson SRC.json` | Current model as JSON |
 | `wait MS` | Pause, e.g. for an animation or a timed alert |
-| `log [n]` | Last n lines of simulator console output (Lua errors and `print` show up here) |
 | `quit` | Stop the simulator. **Always do this when finished** |
 
 ### Keys
 
-| Radio button | KEY | What it opens |
+| Radio button | NAME | What it opens |
 |---|---|---|
 | SYS | `SYS` | System menu |
 | MDL | `MDL` | Model menu |
@@ -91,7 +97,9 @@ Name screenshots after what they show (`system-menu.png`, `after-ok.png`) so the
 | PAGE | `PAGE` | Next page or tab |
 | Encoder press | `ENTER` | Select / edit the focused item |
 
-Any browser key name also works (`Escape`, `PageDown`, `Tab`, letters...). `press` returns `"used": false` if Ethos ignored the key.
+Also `UP`, `DOWN`, `LEFT`, `RIGHT` on the radios that have them, the trims `T1-`, `T1+` ... `T6+` (the number written on the radio) and the function switches `FS1`, `FS2`... A name the radio doesn't have returns `"status": "invalid argument"`.
+
+Every input command returns `{"ok": true, "status": "success"}` once the radio UI handled it, or the failure status (`busy` while a macro runs, `unsupported` e.g. `touch` without a touchscreen).
 
 ## Screen layout (X20 family, 800×480)
 
@@ -104,11 +112,12 @@ Other boards have different resolutions (X18/Twin X Lite 480×320, X14 640×360.
 
 ## Tips
 
-- SYS / MDL / DISP only jump to their menu from the top level. From inside a settings page they are ignored, even though `press` still returns `"used": true`. Press `RTN` until you're back at Home (or a menu grid), then press the menu key.
+- SYS / MDL / DISP only jump to their menu from the top level. From inside a settings page they are ignored, even though `press` still returns `"status": "success"`. Press `RTN` until you're back at Home (or a menu grid), then press the menu key.
 - Don't chain several actions blindly. If one misses (above), the rest land on the wrong screen. Screenshot between steps unless the path was already verified in this session.
 - A radio folder with no models (or no `--root-directory`) boots into the **Create model** wizard, where the menu keys are ignored. Finish or cancel it first.
 - Booting usually shows a **Checklist warning** dialog (throttle, failsafe). Dismiss it with its **OK** button at the bottom right, or with `RTN`.
-- Touch is usually the most direct way in. Use `wheel` + `ENTER` when a target is small or only reachable by focus.
-- Lua errors show up in `log`, not on screen. Check `log` when a widget or tool looks blank.
-- Don't send input while `macro` runs. It blocks until the macro ends.
+- Touch is usually the most direct way in. Use `turnRotaryEncoder` + `press ENTER` when a target is small or only reachable by focus.
+- Lua errors show up in `getLog`, not on screen. Check `getLog` when a widget or tool looks blank.
+- Don't send input while `startMacro` runs. It blocks until the macro ends, and the input commands are refused (`busy`) meanwhile.
+- Screenshots dark? The backlight went off: `resetBacklightTimer`, then take the screenshot again.
 - Report what you saw: include the key screenshot paths in your answer so the user can open them.

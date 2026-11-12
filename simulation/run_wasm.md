@@ -23,8 +23,8 @@ node run_wasm.js <command> [args] [--port N]
 | Option | Description |
 | --- | --- |
 | `--root-directory DIR` | Mounts `DIR` (the host's real filesystem, via `NODEFS`) at the current model's location in the simulator's virtual filesystem. If omitted, an in-memory `MEMFS` (not persisted) is used instead. |
-| `--macro path[.lua]`, `--exec path[.lua]` | Path to a Lua macro to run automatically once the simulator has started. The script waits for the macro to pause at its first line, resumes it (`resumeMacro`), then waits for it to finish before exiting. |
-| `--macro-timeout MS` | Maximum delay (in ms) tolerated for each of the two waits above (initial pause and macro end). If exceeded, the script fails with a timeout error. Without this option, the wait is unbounded. |
+| `--macro path[.lua]`, `--exec path[.lua]` | Path to a Lua macro to run automatically once the simulator has started. The script starts it (`startMacro(path, false)`), then waits for it to finish before exiting. |
+| `--macro-timeout MS` | Maximum delay (in ms) tolerated for the macro to finish. If exceeded, the script fails with a timeout error. Without this option, the wait is unbounded. |
 | `--serve` | Keeps the simulator running after start (and after `--macro`, if given) and accepts commands on `http://127.0.0.1:PORT`. See [Interactive mode](#interactive-mode---serve). |
 | `--port N` | Port for `--serve` and for client commands (default `8765`). |
 | `--shots-dir DIR` | Default folder for `screenshot` files (default `./screenshots`). |
@@ -64,16 +64,31 @@ With `--serve`, the simulator keeps running behind a small HTTP server on `127.0
 
 | Command | Effect |
 | --- | --- |
-| `status` | Simulator state: frame size, switch positions, trims |
-| `screenshot [out.png]` | Save the current screen as PNG |
-| `tap X Y`, `longpress X Y`, `swipe X1 Y1 X2 Y2 [ms]` | Touch input (screen pixels, top-left origin) |
-| `wheel N` | Rotary encoder, N detents |
-| `press KEY [holdMs]`, `keydown KEY`, `keyup KEY` | Keys: `SYS` `MDL` `DISP` `RTN` `PAGE` `ENTER`, or any browser key name |
-| `switch I V`, `fswitch I V`, `analog I V`, `trim I V` | Switches, function switches, analogs, trims |
-| `macro PATH [timeoutMs]` | Run a Lua macro to completion |
-| `wait MS`, `log [n]`, `quit` | Pause, last console lines, stop the simulator |
+| `status` | Simulator state: displays and their size, switch positions, trims, remote control available |
+| `screenshot [out.png] [MAIN\|TOP\|GLASSES]` | Save a display (the main one by default) as PNG |
+| `press NAME [ms]` | Keys `ENTER` `RTN` `SYS` `MDL` `DISP` `PAGE` `UP` `DOWN` `LEFT` `RIGHT` (those the radio has), trims `T1-` `T1+` ... `T6+`, function switches `FS1` `FS2`...; 20 ms by default, from 540 ms a long press |
+| `touch X Y [ms]`, `swipe X1 Y1 X2 Y2` | Touch input (screen pixels, top-left origin); 20 ms by default, from 1000 ms a long press |
+| `turnRotaryEncoder N` | Rotary encoder, N detents (negative turns the other way) |
+| `enterText TEXT` | Type text in the on-screen keyboard |
+| `loadModel PATH` | Load a model file |
+| `resetBacklightTimer` | Turn the screen back on (the frames are dimmed with the backlight) |
+| `setSwitch I V`, `setAnalog I V` | Switches (-100 / 0 / 100), sticks, pots and sliders (-100 to 100): simulator only |
+| `startMacro PATH [timeoutMs]` | Run a Lua macro to completion |
+| `getInformation` | Board, firmware version, RF protocol, display sizes, drives |
+| `getLog [since]` | Log lines (Lua `print()` and errors): the last 50, or the ones since `next` returned by the previous call |
+| `listFiles [PATH]`, `readFile PATH [out]`, `writeFile PATH SRC`, `deleteFile PATH` | Files of the radio storage (`--root-directory`), radio paths from its root; `readFile` returns the text (or base64) when no `out` is given |
+| `reload [SCRIPTS\|ALL]` | Reload the Lua scripts, or everything |
+| `getChannelsOutputs` | Mixer outputs, in % |
+| `getModelJson [out.json]`, `applyModelJson SRC.json` | Current model as JSON |
+| `wait MS`, `quit` | Pause, stop the simulator |
 
-Input commands wait for the display to settle before returning, so a following `screenshot` shows the result.
+Over HTTP, the arguments too big for a URL can be sent as a JSON object in the body of a `POST`: `writeFile` (`path`, and `text` or `base64`), `startMacro` (`code` instead of `path`: the macro is written to `/macros` while it runs, and the result has its output), `applyModelJson` (`model`). This is what the plugin's [MCP server](mcp_server.md) does.
+
+In Git Bash, write the radio paths without the leading `/` (`scripts/main.lua`): Git Bash turns an argument starting with `/` into a Windows path, which the client refuses.
+
+The commands are those of the firmware's remote control, with the same names and arguments as the `simulator` Lua API, the radio USB protocol ([`radio_remote.py`](radio_remote.md)) and the ethos-simulator MCP server. They call the remote control exports of the simulator (see [wasm_simulator.md](wasm_simulator.md#remote-control)), which return once the radio UI handled them: `{"ok": true, "status": "success"}`, or the failure status (`invalid argument`, `unsupported`, `busy` while a macro runs...). The builds older than the `press()` export get `pressKey()` / `pressFunctionSwitch()` and a long press flag for `touch` instead.
+
+Input commands then wait for the display to settle before returning, so a following `screenshot` shows the result.
 
 Example:
 

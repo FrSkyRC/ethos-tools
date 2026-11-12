@@ -8,12 +8,12 @@
 
 'use strict'
 
-// MCP server (stdio, no dependency) of the ethos-simulator Claude Code plugin.
+// MCP server (stdio, no dependency) of the ethos Claude Code plugin.
 // It has the same tools as the ethos-simulator MCP server of the online
 // simulator, and relays them to the local instance which is serving:
 //  - radio_remote.py --serve (a radio connected over USB), when it answers,
 //  - else run_wasm.js --serve (the WASM simulator).
-// Neither is started here: see the ethos-navigate skill. Ports: the
+// Neither is started here: see the ethos:navigate skill. Ports: the
 // ETHOS_RADIO_PORT (8766) and ETHOS_SIMULATOR_PORT (8765) environment variables.
 
 const fs = require('fs')
@@ -31,7 +31,7 @@ const COMMAND_TIMEOUT_MS = 120000
 const INSTRUCTIONS = [
   'Tools to drive a FrSky Ethos radio: the WASM simulator served by run_wasm.js --serve, or a radio',
   'connected over USB and served by radio_remote.py --serve (the radio is used when both are served).',
-  'If no tool answers, start the simulator as the ethos-navigate skill explains.',
+  'If no tool answers, start the simulator as the ethos:navigate skill explains.',
   'Call getInformation() first to know the board, its firmware and the size of its displays.',
   'Use screenshot() to check what the radio displays, resetBacklightTimer() if the screen went dark,',
   'and press(), touch(), swipe() and turnRotaryEncoder() to navigate (e.g. press PAGE to switch between',
@@ -230,7 +230,7 @@ async function callTool(name, args = {}) {
   const target = await findTarget()
   if (!target) {
     return {
-      content: [text(`No Ethos simulator or radio is served: start the simulator with run_wasm.js --serve (port ${ SIMULATOR_PORT }, see the ethos-navigate skill), or a radio with radio_remote.py --serve (port ${ RADIO_PORT }).`)],
+      content: [text(`No Ethos simulator or radio is served: start the simulator with run_wasm.js --serve (port ${ SIMULATOR_PORT }, see the ethos:navigate skill), or a radio with radio_remote.py --serve (port ${ RADIO_PORT }).`)],
       isError: true,
     }
   }

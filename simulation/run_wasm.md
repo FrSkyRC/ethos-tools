@@ -60,7 +60,7 @@ node run_wasm.js X20S_FCC/X20S_FCC.js --root-directory . --macro USER:/macros/x2
 
 ## Interactive mode (`--serve`)
 
-With `--serve`, the simulator keeps running behind a small HTTP server on `127.0.0.1`. Run `run_wasm.js` again with a command name instead of a simulator path, and it acts as a one-shot client: it sends that one command and prints the JSON result. This mode is the backend of the [`ethos-navigate`](skills/ethos-navigate/SKILL.md) Claude Code skill (see the [README](README.md#claude-code-plugin-ethos-simulator)).
+With `--serve`, the simulator keeps running behind a small HTTP server on `127.0.0.1`. Run `run_wasm.js` again with a command name instead of a simulator path, and it acts as a one-shot client: it sends that one command and prints the JSON result. This mode is the backend of the [`ethos:navigate`](skills/navigate/SKILL.md) Claude Code skill (see the [README](README.md#claude-code-plugin-ethos)).
 
 | Command | Effect |
 | --- | --- |

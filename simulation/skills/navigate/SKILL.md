@@ -1,5 +1,5 @@
 ---
-name: ethos-navigate
+name: navigate
 description: Drive the FrSky Ethos radio firmware in its WASM simulator — boot a radio (X20S, X18, X14...), see its screen as PNG screenshots, and operate it with touch, rotary encoder, hardware keys (SYS/MDL/DISP/RTN/PAGE/ENTER), switches and sticks. Use when asked to navigate Ethos menus, check what a screen or Lua widget/tool looks like, reproduce a UI bug, configure a model or radio setting through the UI, or run a Lua macro in the simulator.
 ---
 

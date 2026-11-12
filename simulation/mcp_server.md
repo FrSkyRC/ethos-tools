@@ -1,13 +1,13 @@
 # `mcp_server.js`
 
-MCP server of the `ethos-simulator` Claude Code plugin. It gives Claude the same tools as the *Connect Claude* MCP server of the online simulator (<https://ethos-simulator.frsky-rc.com>), on a local simulator or radio: Claude calls `press`, `touch`, `screenshot`... directly, instead of running command lines.
+MCP server of the `ethos` Claude Code plugin. It gives Claude the same tools as the *Connect Claude* MCP server of the online simulator (<https://ethos-simulator.frsky-rc.com>), on a local simulator or radio: Claude calls `press`, `touch`, `screenshot`... directly, instead of running command lines.
 
 It is a stdio server, in plain Node.js (18+, no dependency). The plugin declares it in [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json), so it starts with Claude Code once the plugin is installed. It relays each tool to the local instance that is serving:
 
 1. [`radio_remote.py --serve`](radio_remote.md) on port `8766`: a radio connected over USB, when it answers;
 2. else [`run_wasm.js --serve`](run_wasm.md#interactive-mode---serve) on port `8765`: the WASM simulator.
 
-It starts neither of them: the [`ethos-navigate`](skills/ethos-navigate/SKILL.md) skill explains how to start the simulator (pick a build, a radio folder). Without one, every tool returns an error saying so. The ports can be changed with the `ETHOS_RADIO_PORT` and `ETHOS_SIMULATOR_PORT` environment variables.
+It starts neither of them: the [`ethos:navigate`](skills/navigate/SKILL.md) skill explains how to start the simulator (pick a build, a radio folder). Without one, every tool returns an error saying so. The ports can be changed with the `ETHOS_RADIO_PORT` and `ETHOS_SIMULATOR_PORT` environment variables.
 
 ## Tools
 

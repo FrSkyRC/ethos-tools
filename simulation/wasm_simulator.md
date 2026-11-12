@@ -53,7 +53,7 @@ The local folder holds one sub-folder per radio, `<root>/<BOARD_NAME>/`, with th
 
 ### Callbacks the page provides
 
-All are optional; the firmware checks that each one exists before calling it. They run on the main thread, at most 100 times per second.
+All are optional; the firmware checks that each one exists before calling it. They run on the main thread, at most 100 times per second, except `onRemoteResult` which is called as soon as a command result is ready.
 
 | Callback | When |
 | --- | --- |
@@ -67,7 +67,8 @@ All are optional; the firmware checks that each one exists before calling it. Th
 | `onDebugEvent(source, line)` | Macro paused on a line |
 | `onRecordEvent(action, overwrite)` | New action recorded |
 | `onMacroEnd()` | Macro finished |
-| `onRemoteSend(bytes)` | Response from the remote control server (`Uint8Array`) |
+| `onStopped()` | Firmware stopped, after `stop()` |
+| `onRemoteResult(id, status, data)` | Result of a remote control command (see Remote control) |
 | `syncToLocal()` | File system saved to IndexedDB |
 
 ## Exported functions
@@ -86,6 +87,8 @@ All examples in this reference go through typed wrappers made with `Module.cwrap
 | `const uint8_t *` + size | `'array'`, `'number'` | `Uint8Array` and its length |
 | `const int16_t *` return | `'number'` | address in `Module.HEAP16` (divide by 2 to index) |
 | no return value | `null` |  |
+
+A `'string'` argument is copied on the wasm stack, which is 64 KB. A longer string overflows it and overwrites the memory after it: the firmware then crashes later, often with `RuntimeError: memory access out of bounds` in an unrelated call. Pass such a string (a model JSON for instance) on the heap: `Module.stringToNewUTF8(value)` copies it into a buffer allocated with `malloc`, the function takes its address as a `'number'`, and `Module._free(address)` releases it. `stringToNewUTF8`, `_malloc` and `_free` are exported for that.
 
 Copy this function into the host. It wraps every exported function; the rest of this reference calls them as `sim.<name>(...)`.
 
@@ -114,12 +117,22 @@ function wrapSimulator(Module) {
     // Model, outputs and settings
     getCurrentModel: w('getCurrentModel', 'string'),
     setModelJsonNeeded: w('setModelJsonNeeded', null, ['boolean']),
-    applyModelJson: w('applyModelJson', 'boolean', ['string']),
+    // the JSON is bigger than the stack: it is passed on the heap
+    applyModelJson: (json) => {
+      const address = Module.stringToNewUTF8(json);
+      try {
+        return Module.ccall('applyModelJson', 'boolean', ['number'], [address]);
+      } finally {
+        Module._free(address);
+      }
+    },
+    modelJsonError: w('modelJsonError', 'string'),
     getChannelsOutputs: w('getChannelsOutputs', 'number'),
     setLanguage: w('setLanguage', null, ['string']),
     loadCustomTranslations: w('loadCustomTranslations', null, ['string']),
     // Telemetry
     injectSPortFrame: w('injectSPortFrame', null, ['number', 'number', 'number', 'number', 'number', 'number', 'number']),
+    injectCrsfFrame: (frameId, payload) => Module.ccall('injectCrsfFrame', null, ['number', 'array', 'number'], [frameId, payload, payload.length]),
     // Macros and recording
     startMacro: w('startMacro', null, ['string', 'boolean']),
     stopMacro: w('stopMacro', null),
@@ -129,8 +142,7 @@ function wrapSimulator(Module) {
     setBreakpoints: w('setBreakpoints', null, ['string']),
     startRecord: w('startRecord', null),
     stopRecord: w('stopRecord', null),
-    // Remote control
-    remoteReceive: w('remoteReceive', null, ['array', 'number']),
+    // Remote control: the commands return a Promise, see wrapRemote()
   };
 }
 
@@ -151,10 +163,13 @@ sim.start();
 
 #### `stop()`
 
-Stops all firmware tasks, unloads Lua scripts and stops the main loop. After `stop()` the main loop no longer runs: to run the radio again, load a new module instance.
+Stops the firmware, asynchronously: `stop()` returns right away, the page keeps running (screen, audio) while the remote control commands already sent are executed, the firmware tasks stop and the model and settings are written. Then Lua scripts are unloaded, the main loop stops and `Module.onStopped()` is called. To run the radio again, load a new module instance.
 
 ```javascript
-sim.stop();
+await new Promise((resolve) => {
+  Module.onStopped = resolve;
+  sim.stop();
+});
 ```
 
 #### `reload(emergency)`
@@ -325,7 +340,13 @@ sim.setModelJsonNeeded(true);
 
 #### `applyModelJson(json)` → `bool`
 
-Replaces the loaded model with `json` (string), in the format `Module.setModelJson` delivers. Returns `false` when the JSON is invalid; a syntax error leaves the current model untouched. The model is swapped between two loops of the main task, under the mixer lock, then its screens and widgets are rebuilt. The call can block briefly while the main task finishes its loop.
+Replaces the loaded model with `json` (string), in the format `Module.setModelJson` delivers. Returns `false` when the JSON is invalid, `modelJsonError()` then gives the reason; a syntax error leaves the current model untouched. A model JSON is often bigger than the 64 KB wasm stack: pass it on the heap, as `wrapSimulator()` does (see [Calling conventions](#calling-conventions)), never as a `'string'` argument. The model is swapped between two loops of the main task, under the mixer lock, then its screens and widgets are rebuilt. The call can block briefly while the main task finishes its loop.
+
+The `functions` array holds the model's special functions only: the global ones are part of the radio settings, they are neither in the JSON nor changed by `applyModelJson`. When `mixes` or `functions` is absent, the model's mixes or special functions are left unchanged.
+
+Out-of-range values are not rejected: they are brought back to the nearest allowed value, as the radio's model setup would. An unknown model `type` becomes `99` (other). The model category settings (`aileronsCount`, `flapsCount`, `elevatorsCount`, `ruddersCount`, `tailType`, `swashType`, `steeringConfig`, `brakesCount`, `enginesCount`) are limited to their channel counts and made consistent with each other: a flying wing (`tailType` 0) has no elevator nor rudder and 2 ailerons at least, a V-tail (`tailType` 2) has `elevatorsCount` and `ruddersCount` set to 1, 3 ailerons, flaps or elevators become 4, and a stabilized receiver lowers the counts it cannot handle. `throttleDeadBand` is limited to 0-100, `modelId` to 0-63. Read the model back with `getModelJson()` to see the values kept.
+
+A JSON exported by another radio is accepted: the arrays whose size depends on the hardware (`trims`, `crossTrims`, `rf.modules`, `preflightChecks.potValues`) are read up to the size of this radio, the extra elements are ignored and the missing ones keep their default value. The sources still reference the switches, trims and pots by index, they may designate other controls on a radio with a different hardware.
 
 ```javascript
 let modelJson;
@@ -336,9 +357,13 @@ sim.setModelJsonNeeded(true);
 const model = JSON.parse(modelJson);
 model.name = 'Glider';
 if (!sim.applyModelJson(JSON.stringify(model))) {
-  console.error('Invalid model JSON');
+  console.error('Invalid model JSON:', sim.modelJsonError());
 }
 ```
+
+#### `modelJsonError()` → `string`
+
+Why the last `applyModelJson()` failed: the message of the exception caught while parsing or reading the JSON, for instance `[json.exception.out_of_range.403] key 'name' not found`. Empty after a success.
 
 #### `getChannelsOutputs()` → pointer
 
@@ -390,6 +415,22 @@ Feeds one S.Port telemetry frame to the firmware, as if a receiver had sent it. 
 setInterval(() => {
   sim.injectSPortFrame(0, 0, 0, 0x1B, 0x10, 0x0210, 1260);
 }, 100);
+```
+
+#### `injectCrsfFrame(frameId, payload)`
+
+Feeds one CRSF telemetry frame to the firmware, as if the external module had sent it. Only the frame ID and the payload are given: the address (`0xEA`), the length and the CRC are added by the firmware. Sensors are discovered and updated exactly as on a real radio, and the frame is forwarded to the Lua scripts listening with `crsf.getSensor()`. The frame is ignored when the payload is longer than 124 bytes.
+
+| Parameter | Type | Meaning |
+| --- | --- | --- |
+| `frameId` | `uint8` | CRSF frame type, for example `0x08` for a battery frame |
+| `payload` | `Uint8Array` or array of bytes | Frame payload, without frame ID and CRC |
+
+The C export is `injectCrsfFrame(frameId, payload, payloadLength)`. The `payload` pointer must be passed with the `'array'` type of `ccall`, as the wrapper above does.
+
+```javascript
+// Battery frame: 12.6 V (0x007E, unit 0.1 V), 1.0 A (0x000A, unit 0.1 A), 500 mAh (0x0001F4), 80 %
+sim.injectCrsfFrame(0x08, new Uint8Array([0x00, 0x7E, 0x00, 0x0A, 0x00, 0x01, 0xF4, 0x50]));
 ```
 
 ### Macros and recording
@@ -471,70 +512,101 @@ Module.FS.writeFile('/persist/X20RS/macros/recorded.lua', lines.join('\n'));
 
 ### Remote control
 
-#### `remoteReceive(data, size)`
+These commands act on the radio the way a user does (keys, touch screen, rotary encoder) and load models. They are the same functions as the `simulator` Lua API and as the remote control protocol of the radio USB serial port.
 
-Sends bytes of the remote control protocol to the simulator. The radio's USB serial port speaks the same protocol, so one client can drive either. Responses and events arrive as `Uint8Array` chunks in `Module.onRemoteSend(bytes)`; a chunk can hold part of a frame or several frames. The simulator accepts the connection without the on-screen confirmation that a real radio asks for.
+A command waits in the firmware until the radio UI has handled it, so it can't return its result right away. Each export takes a request id as first argument, queues the command and returns. A firmware task executes it, then calls `Module.onRemoteResult(id, status, data)` on the main thread as soon as it is done (`data` is `null`, reserved for commands returning data).
 
-Frame format, multi-byte values little endian:
+Status codes: `0` success, `-1` unsupported, `-2` refused, `-3` invalid argument, `-4` I/O error, `-5` busy (a macro is running), `-6` timeout.
 
-| Field | Size | Content |
-| --- | --- | --- |
-| SYNC | 1 | `0xE7` |
-| COMMAND | 1 | Request code; the response uses `COMMAND \| 0x80` |
-| SEQ | 1 | `1`–`255` in requests, echoed in the response; `0` for events sent by the radio |
-| LENGTH | 2 | Payload size, at most 1024 |
-| PAYLOAD | LENGTH | Command arguments; a response starts with status (int8, `0` = success) and flags (`0x01` = last chunk) |
-| CRC16 | 2 | CRC-16/XMODEM (polynomial `0x1021`, initial value `0`) over COMMAND to the end of PAYLOAD |
-
-This example sends `HELLO` (`0x01`, payload = protocol version `1`). The response (`0x81`) carries the protocol version, the firmware version (major, minor, revision) and the board name.
+Copy this function into the host. It turns every command into a function that returns a Promise of `{ status, data }`:
 
 ```javascript
-function crc16(bytes) {
-  let crc = 0;
-  for (const b of bytes) {
-    crc ^= b << 8;
-    for (let i = 0; i < 8; i++) crc = crc & 0x8000 ? ((crc << 1) ^ 0x1021) & 0xFFFF : (crc << 1) & 0xFFFF;
-  }
-  return crc;
+function wrapRemote(Module) {
+  let nextId = 1;
+  const pending = new Map();
+  Module.onRemoteResult = (id, status, data) => {
+    pending.get(id)?.({ status, data });
+    pending.delete(id);
+  };
+  const command = (name, argTypes = []) => (...args) => new Promise((resolve) => {
+    const id = nextId++;
+    pending.set(id, resolve);
+    Module.ccall(name, null, ['number', ...argTypes], [id, ...args]);
+  });
+  return {
+    press: command('press', ['string', 'number']),
+    pressFunctionSwitch: command('pressFunctionSwitch', ['string', 'number']),
+    touch: command('touch', ['number', 'number', 'number']),
+    swipe: command('swipe', ['number', 'number', 'number', 'number']),
+    turnRotaryEncoder: command('turnRotaryEncoder', ['number']),
+    enterText: command('enterText', ['string']),
+    resetBacklightTimer: command('resetBacklightTimer'),
+    resetInactivityTimer: command('resetInactivityTimer'),
+    setDateTime: command('setDateTime', ['number', 'number', 'number', 'number', 'number', 'number', 'boolean']),
+    loadModel: command('loadModel', ['string']),
+  };
 }
 
-function remoteFrame(command, seq, payload = []) {
-  const body = [command, seq, payload.length & 0xFF, payload.length >> 8, ...payload];
-  const crc = crc16(body);
-  return new Uint8Array([0xE7, ...body, crc & 0xFF, crc >> 8]);
-}
-
-Module.onRemoteSend = (bytes) => console.log('radio ->', bytes);
-const frame = remoteFrame(0x01, 1, [1]);   // HELLO, seq 1, version 1
-sim.remoteReceive(frame, frame.length);
+const remote = wrapRemote(Module);
 ```
 
-The protocol also covers keys, touch, switches, analogs, screenshots and file transfer, the same on the simulator and on the radio over USB. Model JSON and macros exist only in the simulator, so they use exported functions instead (applyModelJson, setModelJsonNeeded, startMacro). Its command list is in the next table.
-
-| Code | Command | Payload |
+| Function | Arguments | Action |
 | --- | --- | --- |
-| `0x01` | HELLO | version (1) → version (1), firmware major (1), minor (1), revision (1), board name (string), keys |
-| `0x10` | PRESS\_KEY | key (1), duration ms (4) |
-| `0x11` | TOUCH | x (2), y (2), long press (1) |
-| `0x12` | SWIPE | x1 (2), y1 (2), x2 (2), y2 (2) |
-| `0x13` | TURN\_ROTARY\_ENCODER | steps (2, signed) |
-| `0x14` | ENTER\_TEXT | text (string) |
-| `0x15` | RESET\_BACKLIGHT\_TIMER | – |
-| `0x16` | PRESS\_FUNCTION\_SWITCH | index (1), duration ms (4) |
-| `0x17` | SET\_SWITCH | index (1), position (2, signed) |
-| `0x18` | RESET\_SWITCHES | – |
-| `0x19` | SET\_ANALOG | index (1), value (1, signed) |
-| `0x1A` | RESET\_ANALOGS | – |
-| `0x1B` | RESET\_INACTIVITY\_TIMER | – |
-| `0x20` | SCREENSHOT | display (1) → RLE RGB565 image chunks |
-| `0x30` | LIST\_FILES | path → entries: is directory (1), size (4), name (string) |
-| `0x31` | READ\_FILE | offset (4), path → data chunks |
-| `0x32` | WRITE\_FILE | offset (4), path (string), data |
-| `0x33` | DELETE\_FILE | path |
-| `0x40` | LOAD\_MODEL | path |
-| `0x70` | SET\_DATE\_TIME | year (2), month (0–11), day, hour, min, sec, lock (1 each) |
+| `press(key, duration)` | `key`: `"ENTER"`, `"RTN"`, `"SYS"`, `"MDL"`, `"DISP"`, `"PAGE"`, `"UP"`, `"DOWN"`, `"LEFT"`, `"RIGHT"`, trims `"T1-"`, `"T1+"`… `"T6+"`, function switches `"FS1"`, `"FS2"`… (those the radio has, status `-3` otherwise); `duration` in ms, 540 ms or more is a long press | Press a key, a trim or a function switch |
+| `pressKey(key, duration)` | as `press()` | Same as `press()`, kept for the existing pages |
+| `pressFunctionSwitch(name, duration)` | `name`: `"FS1"`, `"FS2"`…; `duration` in ms | Press a function switch (same as `press()`, kept for the existing pages) |
+| `touch(x, y, duration)` | screen pixels, (0, 0) top left; `duration` in ms (as `press()`), 1000 ms or more is a long press | Tap the touch screen |
+| `swipe(x1, y1, x2, y2)` | screen pixels | Slide a finger on the touch screen |
+| `turnRotaryEncoder(steps)` | detents, the sign gives the direction | Turn the rotary encoder |
+| `enterText(text)` | text | Type in the virtual keyboard |
+| `resetBacklightTimer()` | – | Turn the screen back on |
+| `resetInactivityTimer()` | – | Reset the inactivity alarm timer |
+| `setDateTime(year, month, day, hour, min, sec, lock)` | `month`: 0–11; `lock`: freeze the clock | Set the clock |
+| `loadModel(path)` | radio path, e.g. `/models/model01.bin` | Load a model |
 
-Strings are NUL-terminated. Status codes: `0` success, `-1` unsupported, `-2` refused, `-3` invalid argument, `-4` I/O error, `-5` busy, `-6` timeout. The radio also sends events with SEQ `0`: `0xC1` state (flight mode, RF active, backlight on) and `0xC2` connection confirmed.
+```javascript
+await remote.press('PAGE', 20);
+await remote.touch(400, 240, 20);
+const { status } = await remote.swipe(600, 240, 200, 240);
+```
+
+There is no screenshot command: the page already gets every frame (see Screenshots below).
+
+Switches, sticks, files and the screen have their own exports or callbacks (`setSwitchPosition()`, `setAnalogPosition()`, `Module.FS`), so they are not repeated here. A command sent while a macro runs is refused with status `-5`. Commands sent before `stop()` are executed first; commands sent after are refused with status `-2`.
+
+### Screenshots
+
+The screen comes with every frame in `updateCanvas(width, height, ptr)` (and `updateCanvasTop` for the top LCD): `ptr` points to a static buffer of the firmware, so it stays valid, and its content up to date, as long as the module runs. The pixels are RGB565, with the rows bottom-up. A command result arrives after the UI has handled it, so the buffer already shows its effect.
+
+```javascript
+let mainScreen;
+Module.updateCanvas = (width, height, ptr) => {
+  mainScreen = { width, height, ptr };
+  // ... draw it
+};
+
+// PNG data URL of the main screen
+function screenshot() {
+  const { width, height, ptr } = mainScreen;
+  const pixels = new Uint16Array(Module.HEAPU16.buffer, ptr, width * height);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  const image = context.createImageData(width, height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const pixel = pixels[(height - 1 - y) * width + x];   // bottom-up rows
+      const r = (pixel >> 11) & 0x1F, g = (pixel >> 5) & 0x3F, b = pixel & 0x1F;
+      image.data.set([(r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2), 255], (y * width + x) * 4);
+    }
+  }
+  context.putImageData(image, 0, 0);
+  return canvas.toDataURL('image/png');
+}
+```
+
+The frames are dimmed while the backlight is dimmed: call `resetBacklightTimer()` first for a full brightness screenshot.
 
 ## Simulator Lua API
 
@@ -542,9 +614,10 @@ The global `simulator` table drives the simulated radio from a Lua macro. Every 
 
 | Function | Since | Purpose |
 | --- | --- | --- |
-| `touch(x, y)` | 1.5.0 | Tap the touch screen. Error on radios without one |
+| `touch(x, y, [duration])` | 1.5.0 | Tap the touch screen; duration (26.2.0) in seconds, default 0.02, 1 s or more is a long press. Error on radios without one |
 | `swipe(x1, y1, x2, y2)` | 26.1.3 | Slide a finger on the touch screen |
-| `pressKey(key, [duration])` | 1.5.0 | Press a key; duration in seconds, default 0.02 |
+| `press(name, [duration])` | 26.2.0 | Press a key, a trim or a function switch by its name as in the remote control (`"ENTER"`, `"T1+"`, `"FS1"`…, error if the radio has no such key); duration in seconds, default 0.02, 0.54 s or more is a long press |
+| `pressKey(key, [duration])` | 1.5.0 | Press a key by its index `KEY_xxx`; duration in seconds, default 0.02 |
 | `pressFunctionSwitch(index, [duration])` | 26.1.0 | Press a function switch; duration in seconds, default 0.02 |
 | `turnRotaryEncoder(steps)` | 1.5.0 | Turn the rotary encoder |
 | `enterText(text)` | 26.1.0 | Type text in the virtual keyboard |
@@ -559,6 +632,7 @@ The global `simulator` table drives the simulated radio from a Lua macro. Every 
 | `connectUsb([state])` | 1.5.0 | Simulate a USB connect or disconnect |
 | `advertizeBluetooth(name, [address])` | 26.1.0 | Make a Bluetooth device appear during a scan; address as `AA:BB:CC:DD:EE:FF` |
 | `injectSPortFrame({module, band, rx, physId, primId, appId, value})` | 26.1.0 | Inject an S.Port telemetry frame |
+| `injectCrsfFrame(frameId, payload)` | 26.2.0 | Inject a CRSF telemetry frame from the external module; length and CRC are computed |
 | `setReadOnly(on)` | 1.5.0 | Stop the simulator from writing files |
 | `resetInactivityTimer()` | 26.1.0 | Reset the inactivity alarm timer |
 | `resetBacklightTimer()` | 26.1.0 | Keep the backlight on |
@@ -592,10 +666,10 @@ While the macro is paused, the radio keeps running: screens refresh and the page
 
 The simulator runs the real firmware logic, but everything outside the radio is simulated or absent.
 
-- **RF and telemetry:** no RF module is connected. Telemetry exists only through `injectSPortFrame()`.
+- **RF and telemetry:** no RF module is connected. Telemetry exists only through `injectSPortFrame()` and `injectCrsfFrame()`.
 - **Bluetooth:** no real device. A device appears in a scan only with `simulator.advertizeBluetooth()`. ActiveLook glasses are drawn through `updateCanvasGlasses`.
 - **USB:** simulated with `simulator.connectUsb()`.
 - **Battery:** the main voltage is fixed.
 - **Clock:** taken from the browser, unless set with `simulator.setDateTime()`.
-- **Refresh rate:** callbacks run at most 100 times per second, on the browser main thread.
+- **Refresh rate:** callbacks run at most 100 times per second, on the browser main thread (`onRemoteResult` excepted, see Remote control).
 - **Storage:** in a browser, files live in IndexedDB, per origin, and clearing site data erases models and settings. Under Node.js they are plain files in the mounted folder.

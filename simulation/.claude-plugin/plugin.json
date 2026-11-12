@@ -1,0 +1,17 @@
+{
+  "name": "ethos-simulator",
+  "version": "0.2.0",
+  "description": "Navigate FrSky Ethos in its WASM simulator or on a radio connected over USB: boot a radio, take screenshots, drive it with touch, keys, encoder, switches and sticks, read its log, manage its files and model.",
+  "author": {
+    "name": "Rob Thomson & Bertrand Songis"
+  },
+  "homepage": "https://github.com/FrSkyRC/ethos-tools/tree/main/simulation",
+  "repository": "https://github.com/FrSkyRC/ethos-tools",
+  "keywords": ["ethos", "frsky", "simulator", "wasm", "lua", "mcp"],
+  "mcpServers": {
+    "ethos": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp_server.js"]
+    }
+  }
+}

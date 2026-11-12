@@ -28,7 +28,7 @@ const readline = require('readline')
 const zlib = require('zlib')
 const { spawn } = require('child_process')
 
-const SERVER_INFO = { name: 'ethos', version: '0.2.0' }
+const SERVER_INFO = { name: 'ethos', version: '0.3.0' }
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18'
 const RADIO_PORT = Number(process.env.ETHOS_RADIO_PORT || 8766)
 const SIMULATOR_PORT = Number(process.env.ETHOS_SIMULATOR_PORT || 8765)

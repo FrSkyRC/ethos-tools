@@ -11,7 +11,7 @@ Tools and documentation for the Ethos simulator.
 
 ## Claude Code plugin: `ethos`
 
-This folder is also a [Claude Code](https://claude.com/claude-code) plugin. Its [`ethos:navigate`](skills/navigate/SKILL.md) skill teaches Claude to start [`run_wasm.js --serve`](run_wasm.md#interactive-mode---serve), and its [MCP server](mcp_server.md) gives Claude tools to operate the simulator, or a radio served by [`radio_remote.py`](radio_remote.md). Claude takes a screenshot, reads it, touches the screen or presses a key, and repeats. You can then ask things like *"open the Mixes page and show me what it looks like"* or *"check that my widget renders on the X18"*.
+This folder is also a [Claude Code](https://claude.com/claude-code) plugin. Its [MCP server](mcp_server.md) gives Claude tools to start the simulator of any radio and Ethos release (26.2 or newer, downloaded from GitHub) and to operate it, or a radio served by [`radio_remote.py`](radio_remote.md). Its [`ethos:navigate`](skills/navigate/SKILL.md) skill teaches Claude how to navigate, and how to start [`run_wasm.js --serve`](run_wasm.md#interactive-mode---serve) from the command line. Claude takes a screenshot, reads it, touches the screen or presses a key, and repeats. You can then ask things like *"open the Mixes page and show me what it looks like"* or *"check that my widget renders on the X18"*.
 
 Install it from any Claude Code session:
 
@@ -22,4 +22,4 @@ Install it from any Claude Code session:
 
 Inside a clone of this repository, the project settings (`.claude/settings.json`) already list the marketplace, and Claude Code offers to install the plugin when you trust the folder.
 
-Requirements: Node.js 18+ and an Ethos WASM build (`<BOARD>_<PROTOCOL>.js` + `.wasm`). The skill finds builds that the Ethos VS Code extension has already downloaded.
+Requirements: Node.js 18+. The MCP server downloads the simulators it needs (`startSimulator()`); from the command line, the skill can also use the builds that the Ethos VS Code extension has already downloaded.

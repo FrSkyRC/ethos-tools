@@ -13,6 +13,17 @@ The script ships with this skill: it is `../../run_wasm.js` relative to this ski
 Shell variables don't persist between Bash calls, so write the absolute path into each command.
 Requires Node.js 18+.
 
+## 0. With the MCP tools: `startSimulator`
+
+When the plugin's MCP tools (`ethos`) are available, start the simulator with them instead of steps 1 to 3:
+
+- `startSimulator(radio, release, rootDirectory)` downloads the simulator of any radio from the Ethos releases on GitHub (cached after the first time), starts `run_wasm.js --serve` and waits until it answers. `radio` is a board (`X20S`, the FCC version then) or `BOARD-PROTOCOL` (`X18-EU`, `X20S-FLEX`). `release` defaults to the newest prerelease. Only 26.2 or newer: the older simulators have no remote control.
+- `listSimulators(release)` lists the releases and the radio names of one of them.
+- `rootDirectory` follows the same rules as step 2 below. Without it, the radio is empty and in memory.
+- `stopSimulator()` when finished, instead of `quit`.
+
+The simulator is served on the default port, so the command lines of step 4 work on it too. Go to step 4.
+
 ## 1. Find a simulator build
 
 Builds are `<BOARD>_<PROTOCOL>.js` + `.wasm` pairs (e.g. `X20S_FCC`). The Ethos VS Code extension caches them in:

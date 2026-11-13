@@ -1,0 +1,4 @@
+# python -m pip install -r tests/requirements.txt
+rapidocr        # reads the screen texts (OCR), to find what to touch
+onnxruntime     # the OCR engine
+pyserial        # a radio on a serial port (radio_remote.py)

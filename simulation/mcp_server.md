@@ -19,7 +19,7 @@ When neither serves, the tools return an error saying so, except the three tools
 
 `listSimulators(release)` lists the releases 26.2 or newer that have simulators, and the radios of one of them. `stopSimulator()` stops the simulator served on the port, whoever started it. The one started by `startSimulator()` is also stopped with the MCP server, at the end of the Claude session.
 
-A downloaded simulator is reused until its asset changes on GitHub (the assets of a release candidate can be uploaded again). Without network, a simulator already downloaded for the requested release is used. The cache folder is `%LOCALAPPDATA%\ethos-tools` on Windows, `~/Library/Caches/ethos-tools` on macOS, `~/.cache/ethos-tools` elsewhere; it also holds `simulator.log`, the output of the last simulator started.
+A downloaded simulator is reused until its asset changes on GitHub (the assets of a release candidate can be uploaded again). Without network, a simulator already downloaded for the requested release is used. The cache folder is `%LOCALAPPDATA%\ethos-tools` on Windows, `~/Library/Caches/ethos-tools` on macOS, `~/.cache/ethos-tools` elsewhere; it also holds `simulator.log`, the output of the last simulator started. The release code is in `simulators.js`, shared with [`run_wasm.js --radio`](run_wasm.md#simulators-of-the-releases) and the [tests](tests/README.md): they use the same cache.
 
 The radio is never started here: run [`radio_remote.py --serve`](radio_remote.md) to connect one.
 
@@ -49,9 +49,13 @@ The radio is never started here: run [`radio_remote.py --serve`](radio_remote.md
 | `turnRotaryEncoder(steps)` | ✔ | ✔ | Rotary encoder |
 | `enterText(text)` | ✔ | ✔ | Type in the text field being edited |
 | `loadModel(path)` | ✔ | ✔ | Load a model file |
-| `listFiles(path)`, `readFile(path)`, `writeFile(path, text\|base64)`, `deleteFile(path)` | ✔ | ✔ | Files of the radio storage, paths from its root (`/scripts/...`, `SD:/...` on a radio) |
+| `listFiles(path)`, `readFile(path)`, `writeFile(path, text\|base64)`, `createDirectory(path)`, `deleteFile(path)` | ✔ | ✔ | Files of the radio storage, paths from its root (`/scripts/...`, `SD:/...` on a radio) |
 | `reload(SCRIPTS\|ALL)` | ✔ | ✔ | Reload the Lua scripts, or everything |
 | `getChannelsOutputs()` | ✔ | ✔ | Mixer outputs, in % |
+| `getControls(since?, timeout?)` | ✔ | ✔ | Switches (-1 up, 0 middle, 1 down), trims in %, function switches, as sent by the radio when they change; with `since` (the `version` of a previous call), waits until they change |
+| `resetFunctionSwitches()` | ✔ | ✔ | Turn all the function switches of the current model off |
+
+The resource `ethos://controls` has the same content as `getControls()`. A client subscribed to it (`resources/subscribe`) gets `notifications/resources/updated` when the controls change: the server waits for them with `getControls` (long poll). The notification goes to the MCP client, not to the model: Claude sees the changes through `getControls(since)`.
 | `getModelJson()`, `applyModelJson(model)` | ✔ | – | Current model as JSON |
 | `startMacro(code)` | ✔ | – | Run a Lua macro, return what it printed |
 

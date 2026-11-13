@@ -19,6 +19,7 @@ Requires pyserial (serial) and hidapi (hid, only for `mode`). See radio_remote.m
 
 import argparse
 import base64
+import contextlib
 import json
 import os
 import re
@@ -40,7 +41,7 @@ HID_USB_MODE_REQUEST = 0x81
 HID_USB_MODE = {'serial': 0x68, 'storage': 0x69}
 
 SYNC = 0xE7
-PROTOCOL_VERSION = 9  # 9: function switches pressed with PRESS, TOUCH duration
+PROTOCOL_VERSION = 11  # 9: function switches pressed with PRESS, TOUCH duration, 10: createDirectory, 11: version suffix in HELLO, EVENT_CONTROLS, resetFunctionSwitches
 CMD = {
     'HELLO': 0x01,
     'PRESS': 0x10,  # PRESS_KEY before the protocol version 9
@@ -56,16 +57,21 @@ CMD = {
     'READ_FILE': 0x31,
     'WRITE_FILE': 0x32,
     'DELETE_FILE': 0x33,
+    'CREATE_DIRECTORY': 0x34,  # since the protocol version 10
     'LOAD_MODEL': 0x40,
     'RELOAD': 0x41,
     'CHANNELS_OUTPUTS': 0x50,
     'TRIMS': 0x51,
+    'RESET_FUNCTION_SWITCHES': 0x53,  # since the protocol version 11
 }
 EVENT_STATE = 0xC1
 EVENT_CONNECTION = 0xC2
 EVENT_LOG = 0xC3
+EVENT_CONTROLS = 0xC4  # since the protocol version 11: switches, trims, function switches, when they change
+SWITCH_NOT_INSTALLED = -128
 STATUS = {0: 'success', -1: 'unsupported', -2: 'refused', -3: 'invalid argument',
-          -4: 'I/O error', -5: 'busy', -6: 'timeout'}
+          -4: 'I/O error', -5: 'busy', -6: 'timeout',
+          -7: 'woke up (the screen was off: the input only turned it back on, send it again)'}
 KEYS = ['SYS', 'MDL', 'DISP', 'PAGE', 'RTN', 'ENTER', 'UP', 'DOWN', 'LEFT', 'RIGHT']
 TRIM_KEY = re.compile(r'T[1-6][+-]')  # trims are pressed as keys: T1+ moves trim 1 up
 FUNCTION_SWITCH = re.compile(r'FS[1-9][0-9]*')
@@ -90,10 +96,13 @@ CLIENT_COMMANDS = {
     'listFiles': ['path'],
     'readFile': ['path', 'out'],
     'writeFile': ['path', 'src'],
+    'createDirectory': ['path'],
     'deleteFile': ['path'],
     'reload': ['what'],
     'getChannelsOutputs': [],
     'getTrims': [],
+    'getControls': ['since', 'timeout'],
+    'resetFunctionSwitches': [],
     'wait': ['ms'],
     'quit': [],
 }
@@ -290,7 +299,7 @@ def encode_png(width, height, rgb565):
 
 class Radio:
     def __init__(self, com, log):
-        import serial  # pylint: disable=import-outside-toplevel
+        serial = import_pyserial()
         self.serial = serial.Serial(com, 115200, timeout=0.05)
         self.log = log
         self.seq = 0
@@ -301,6 +310,9 @@ class Radio:
         self.screens = {}
         self.hello = None
         self.state = None  # last EVENT_STATE: flight mode, RF active, backlight on
+        self.controls = None  # last EVENT_CONTROLS: switches, trims, function switches
+        self.controls_version = 0  # incremented at each EVENT_CONTROLS
+        self.controls_changed = threading.Condition()
         self.local_volume = None  # 'RADIO:' on the radios with volumes (local storage and SD card)
         threading.Thread(target=self._read_loop, daemon=True).start()
 
@@ -336,6 +348,8 @@ class Radio:
                     self.refused = True
             elif command == EVENT_LOG:
                 self.log(payload.decode('utf-8', 'replace'))
+            elif command == EVENT_CONTROLS:
+                self._on_controls(payload)
             elif command == EVENT_STATE and len(payload) >= 3:
                 self.state = {'flightMode': payload[0], 'rfActive': bool(payload[1]), 'backlightOn': bool(payload[2])}
             return
@@ -346,6 +360,34 @@ class Radio:
         if payload[1] & 0x01:
             request['status'] = struct.unpack('b', payload[:1])[0]
             request['done'].set()
+
+    def _on_controls(self, payload):
+        """EVENT_CONTROLS: switches count, positions (-1 up, 0 middle, 1 down), trims count, trims,
+        function switches count, states."""
+        try:
+            r = Reader(payload)
+            positions = [struct.unpack('b', bytes((r.u8(),)))[0] for _ in range(r.u8())]
+            count = r.u8()
+            trims = [round(v * 100 / 256) for v in struct.unpack(f'<{count}h', bytes(r.u8() for _ in range(2 * count)))]
+            count, states = r.u8(), r.u8()
+        except (IndexError, struct.error):
+            return
+        controls = {
+            'switches': {f'S{chr(65 + i)}': p for i, p in enumerate(positions) if p != SWITCH_NOT_INSTALLED},
+            'trims': trims,
+            'functionSwitches': {f'FS{i + 1}': bool(states & (1 << i)) for i in range(count)},
+        }
+        with self.controls_changed:
+            self.controls = controls
+            self.controls_version += 1
+            self.controls_changed.notify_all()
+
+    def wait_controls(self, since=None, timeout=0):
+        """The controls and their version, once their version is no more since (timeout s at most)."""
+        with self.controls_changed:
+            if since is not None:
+                self.controls_changed.wait_for(lambda: self.controls_version != since, timeout)
+            return self.controls, self.controls_version
 
     def request(self, command, payload=b'', timeout=10):
         with self.lock:
@@ -367,6 +409,10 @@ class Radio:
         r = Reader(data)
         self.hello = {'protocol': r.u8(), 'firmware': f'{r.u8()}.{r.u8()}.{r.u8()}',
                       'board': r.string(), 'region': r.string(), 'gitHash': r.string()}
+        # Since the protocol version 11, the version suffix (RC11...), empty for a release
+        suffix = r.string() if not r.at_end() else ''
+        if suffix:
+            self.hello['firmware'] += f'-{suffix}'
         # Already accepted earlier in this connection: no prompt on the radio
         if self.request(CMD['RESET_INACTIVITY_TIMER'])[0] == 0:
             self.accepted.set()
@@ -461,6 +507,12 @@ class Radio:
     def delete_file(self, path):
         return self.request(CMD['DELETE_FILE'], cstr(self.radio_path(path)))[0]
 
+    def create_directory(self, path):
+        """Protocol version 10: its parent must exist."""
+        if self.hello['protocol'] < 10:
+            return -1  # unsupported
+        return self.request(CMD['CREATE_DIRECTORY'], cstr(self.radio_path(path)))[0]
+
     def reload(self, what):
         """Protocol version 7."""
         return self.request(CMD['RELOAD'], bytes((RELOAD[what],)))[0]
@@ -488,6 +540,12 @@ class Radio:
         values = [round(v * 100 / 256) for v in struct.unpack(f'<{len(data) // 2}h', data)] if status == 0 else []
         return status, values
 
+    def reset_function_switches(self):
+        """All the function switches of the current model off. Protocol version 11."""
+        if self.hello['protocol'] < 11:
+            return -1  # unsupported
+        return self.request(CMD['RESET_FUNCTION_SWITCHES'])[0]
+
 
 def switch_usb_mode(mode):
     import hid  # pylint: disable=import-outside-toplevel
@@ -499,9 +557,25 @@ def switch_usb_mode(mode):
         device.close()
 
 
+def import_pyserial():
+    """pyserial, or an explicit error when it is missing or hidden by another package
+    named serial (pip "serial", a serialization library)."""
+    try:
+        import serial  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        sys.exit('pyserial is missing: python -m pip install pyserial')
+    try:
+        import serial.tools.list_ports  # pylint: disable=import-outside-toplevel,unused-import
+        if not hasattr(serial, 'Serial'):
+            raise ImportError
+    except ImportError:
+        sys.exit(f'The serial module of {os.path.dirname(serial.__file__)} is not pyserial (pip package "serial"?): '
+                 'python -m pip uninstall serial, then python -m pip install pyserial')
+    return serial
+
+
 def find_com_port():
-    from serial.tools import list_ports  # pylint: disable=import-outside-toplevel
-    for port in list_ports.comports():
+    for port in import_pyserial().tools.list_ports.comports():
         if port.vid == ETHOS_VID and port.pid == ETHOS_PID:
             return port.device
     return None
@@ -519,7 +593,9 @@ class Session:
         radio = self.radio
         num = lambda k, d=None: int(q[k]) if k in q else d  # noqa: E731
         result = lambda status, **extra: {'ok': status == 0, 'status': STATUS.get(status, status), **extra}  # noqa: E731
-        settle = num('settle', 300) / 1000
+        # The radio answers an input once its UI loop handled it and repainted the screen: no
+        # delay needed before a screenshot. settle (ms) adds one, for the animations...
+        settle = num('settle', 0) / 1000
         if cmd == 'status':
             return {'ok': True, **radio.hello}
         if cmd == 'screenshot':
@@ -557,7 +633,7 @@ class Session:
                     'rfProtocol': radio.hello['region'] or None, 'gitHash': radio.hello['gitHash'],
                     'protocolVersion': radio.hello['protocol'],
                     'displays': {name: {'width': image[0], 'height': image[1]} for name, image in screens.items()},
-                    'drives': radio.drives(), 'state': radio.state}
+                    'drives': radio.drives(), 'state': radio.state, 'controls': radio.controls}
         elif cmd == 'getLog':
             return {'ok': True, **self.log.get(int(q['since']) if q.get('since') not in (None, '') else None)}
         elif cmd == 'listFiles':
@@ -586,6 +662,8 @@ class Session:
                 data = str(q.get('text') or '').encode('utf-8')
             status = radio.write_file(q['path'], data)
             return result(status, path=q['path'], size=len(data))
+        elif cmd == 'createDirectory':
+            return result(radio.create_directory(q['path']), path=q['path'])
         elif cmd == 'deleteFile':
             return result(radio.delete_file(q['path']), path=q['path'])
         elif cmd == 'reload':
@@ -597,8 +675,19 @@ class Session:
             status, outputs = radio.channels_outputs()
             return result(status, outputs=outputs)
         elif cmd == 'getTrims':
+            if radio.controls is not None:  # sent by the radio when they change
+                return result(0, trims=radio.controls['trims'])
             status, values = radio.trims()
             return result(status, trims=values)
+        elif cmd == 'getControls':
+            # The last ones sent by the radio; with since, once they changed (timeout ms at most)
+            since = int(q['since']) if q.get('since') not in (None, '') else None
+            controls, version = radio.wait_controls(since, num('timeout', 30000) / 1000)
+            if controls is None:
+                return {'ok': False, 'status': STATUS[-1], 'error': 'The radio sends no controls (firmware before the protocol version 11)'}
+            return {'ok': True, **controls, 'version': version, 'changed': since is None or version != since}
+        elif cmd == 'resetFunctionSwitches':
+            status = radio.reset_function_switches()
         elif cmd == 'wait':
             time.sleep(num('ms', 500) / 1000)
             return {'ok': True}
@@ -639,10 +728,12 @@ def serve(args):
             url = urllib.parse.urlparse(self.path)
             q = dict(urllib.parse.parse_qsl(url.query))
             q.update(body or {})
-            # Commands run one at a time, in arrival order
-            with lock:
+            # Commands run one at a time, in arrival order. getControls only reads the state the
+            # radio sent: it can wait for a change without blocking the other commands
+            cmd = url.path.lstrip('/')
+            with lock if cmd != 'getControls' else contextlib.nullcontext():
                 try:
-                    body = session.handle(url.path.lstrip('/'), q)
+                    body = session.handle(cmd, q)
                 except Exception as e:  # pylint: disable=broad-except
                     body = {'ok': False, 'error': str(e)}
             self.reply(body)

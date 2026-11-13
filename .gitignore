@@ -3,3 +3,4 @@
 .DS_Store
 *.pyc
 *.luac
+/test-results

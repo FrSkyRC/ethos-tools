@@ -516,7 +516,7 @@ These commands act on the radio the way a user does (keys, touch screen, rotary 
 
 A command waits in the firmware until the radio UI has handled it, so it can't return its result right away. Each export takes a request id as first argument, queues the command and returns. A firmware task executes it, then calls `Module.onRemoteResult(id, status, data)` on the main thread as soon as it is done (`data` is `null`, reserved for commands returning data).
 
-Status codes: `0` success, `-1` unsupported, `-2` refused, `-3` invalid argument, `-4` I/O error, `-5` busy (a macro is running), `-6` timeout.
+Status codes: `0` success, `-1` unsupported, `-2` refused, `-3` invalid argument, `-4` I/O error, `-5` busy (a macro is running), `-6` timeout, `-7` woke up: the screen was off, and as for the user the input (`press()` of a key, `touch()`, `swipe()`, `turnRotaryEncoder()`) only turned it back on, send it again.
 
 Copy this function into the host. It turns every command into a function that returns a Promise of `{ status, data }`:
 
@@ -544,6 +544,7 @@ function wrapRemote(Module) {
     resetInactivityTimer: command('resetInactivityTimer'),
     setDateTime: command('setDateTime', ['number', 'number', 'number', 'number', 'number', 'number', 'boolean']),
     loadModel: command('loadModel', ['string']),
+    resetFunctionSwitches: command('resetFunctionSwitches'),
   };
 }
 
@@ -563,6 +564,7 @@ const remote = wrapRemote(Module);
 | `resetInactivityTimer()` | – | Reset the inactivity alarm timer |
 | `setDateTime(year, month, day, hour, min, sec, lock)` | `month`: 0–11; `lock`: freeze the clock | Set the clock |
 | `loadModel(path)` | radio path, e.g. `/models/model01.bin` | Load a model |
+| `resetFunctionSwitches()` | – | Turn all the function switches of the current model off, as for a new model (status `-1` without function switches) |
 
 ```javascript
 await remote.press('PAGE', 20);
@@ -607,6 +609,8 @@ function screenshot() {
 ```
 
 The frames are dimmed while the backlight is dimmed: call `resetBacklightTimer()` first for a full brightness screenshot.
+
+The input commands act as the user: `press()`, `touch()`, `swipe()`, `turnRotaryEncoder()` and `enterText()` wake the backlight up, and while the screen was off (the navigation is then disabled), a key press, a touch or an encoder step only turns it back on, as on the radio, and returns the status `-7` (the `simulator` Lua functions then send it again, so a macro is not affected). `resetBacklightTimer()` turns it on without any other effect.
 
 ## Simulator Lua API
 

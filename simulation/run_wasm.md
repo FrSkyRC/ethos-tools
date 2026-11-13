@@ -11,12 +11,22 @@ A small Node.js runner for executing the Ethos simulator's **WebAssembly** (Emsc
 
 ```text
 node run_wasm.js <simulator.js> [--root-directory DIR] [--macro path[.lua]] [--macro-timeout MS] [--serve [--port N] [--shots-dir DIR]]
+node run_wasm.js --radio RADIO [--release TAG] [...the same options]
+node run_wasm.js --list-simulators [--radio PATTERN] [--release TAG]
 node run_wasm.js <command> [args] [--port N]
 ```
 
 ### Positional argument
 
-- `<simulator.js>` — path to the simulator file (resolved to an absolute path). This is the only required argument.
+- `<simulator.js>` — path to the simulator file (resolved to an absolute path). Required, unless `--radio` gives a simulator of a release.
+
+### Simulators of the releases
+
+`--radio RADIO` runs the simulator of a radio of a [FrSkyRC/ETHOS-Feedback-Community](https://github.com/FrSkyRC/ETHOS-Feedback-Community/releases) release instead of a file: `X20S` (its FCC simulator), `X20S-FLEX`, `X18-LBT` (the `EU` asset). `--release TAG` (e.g. `26.2.0-RC10`) chooses the release, the newest prerelease by default; the releases older than 26.2 have no remote control exports. The `<RADIO>-WebSimulator.zip` asset is downloaded once in the cache folder of the MCP server (`ETHOS_CACHE_DIR`, see [mcp_server.md](mcp_server.md#starting-a-simulator)), and downloaded again only when it changed.
+
+`--list-simulators` prints, as JSON, the release and its radios: `{"ok": true, "release": "26.2.0-RC11", "prerelease": true, "radios": ["X20-FCC", ...]}`. With `--radio PATTERN`, only the radios matching it: `X20*` (the FCC ones), `X20S-*` (all its countries), `*`...
+
+The code is in `simulators.js`, shared with [`mcp_server.js`](mcp_server.md) (`listSimulators`, `startSimulator`) and used by the [tests](tests/README.md).
 
 ### Options
 
@@ -76,9 +86,12 @@ With `--serve`, the simulator keeps running behind a small HTTP server on `127.0
 | `startMacro PATH [timeoutMs]` | Run a Lua macro to completion |
 | `getInformation` | Board, firmware version, RF protocol, display sizes, drives |
 | `getLog [since]` | Log lines (Lua `print()` and errors): the last 50, or the ones since `next` returned by the previous call |
-| `listFiles [PATH]`, `readFile PATH [out]`, `writeFile PATH SRC`, `deleteFile PATH` | Files of the radio storage (`--root-directory`), radio paths from its root; `readFile` returns the text (or base64) when no `out` is given |
+| `listFiles [PATH]`, `readFile PATH [out]`, `writeFile PATH SRC`, `createDirectory PATH`, `deleteFile PATH` | Files of the radio storage (`--root-directory`), radio paths from its root; `readFile` returns the text (or base64) when no `out` is given |
 | `reload [SCRIPTS\|ALL]` | Reload the Lua scripts, or everything |
 | `getChannelsOutputs` | Mixer outputs, in % |
+| `getTrims` | Trims of the current flight mode, in % |
+| `getControls [since] [timeoutMs]` | Switches (`{"SA": -1, ...}`: -1 up, 0 middle, 1 down), trims in %, function switches (`{"FS1": true, ...}`) and `version`, as the simulator sends them when they change; with `since` (a `version`), waits until they change. It doesn't wait for the other commands |
+| `resetFunctionSwitches` | All the function switches of the current model turned off |
 | `getModelJson [out.json]`, `applyModelJson SRC.json` | Current model as JSON |
 | `wait MS`, `quit` | Pause, stop the simulator |
 

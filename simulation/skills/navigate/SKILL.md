@@ -90,7 +90,7 @@ Name screenshots after what they show (`system-menu.png`, `after-ok.png`) so the
 | `startMacro PATH [timeoutMs]` | Runs a Lua macro (e.g. `USER:/macros/x.lua`) to completion |
 | `getInformation` | Board, firmware version, display sizes |
 | `getLog [since]` | Simulator log: Lua errors and `print` show up here. The result has `next`: `getLog NEXT` then only returns the newer lines |
-| `listFiles [PATH]`, `readFile PATH [out]`, `writeFile PATH SRC`, `deleteFile PATH` | Files of the radio folder, paths from its root. In Git Bash, without the leading `/` (`scripts/main.lua`) |
+| `listFiles [PATH]`, `readFile PATH [out]`, `writeFile PATH SRC`, `createDirectory PATH`, `deleteFile PATH` | Files of the radio folder, paths from its root. In Git Bash, without the leading `/` (`scripts/main.lua`) |
 | `reload [SCRIPTS\|ALL]` | Reload the Lua scripts after changing one, or everything |
 | `getChannelsOutputs` | Mixer outputs in %, to check a model change |
 | `getModelJson [out.json]`, `applyModelJson SRC.json` | Current model as JSON |
@@ -130,5 +130,5 @@ Other boards have different resolutions (X18/Twin X Lite 480×320, X14 640×360.
 - Touch is usually the most direct way in. Use `turnRotaryEncoder` + `press ENTER` when a target is small or only reachable by focus.
 - Lua errors show up in `getLog`, not on screen. Check `getLog` when a widget or tool looks blank.
 - Don't send input while `startMacro` runs. It blocks until the macro ends, and the input commands are refused (`busy`) meanwhile.
-- Screenshots dark? The backlight went off: `resetBacklightTimer`, then take the screenshot again.
+- Screenshots dark? The backlight went off: `resetBacklightTimer`, then take the screenshot again. As on the radio, the first `press`, `touch`, `swipe` or encoder step on a dark screen only turns it back on: it then returns `"status": "woke up ..."`, send it again.
 - Report what you saw: include the key screenshot paths in your answer so the user can open them.

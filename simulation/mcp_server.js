@@ -25,8 +25,8 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const readline = require('readline')
-const zlib = require('zlib')
 const { spawn } = require('child_process')
+const { MIN_VERSION, cacheDir, recentReleases, findRelease, simulatorAssets, radioName, resolveSimulator } = require('./simulators')
 
 const SERVER_INFO = { name: 'ethos', version: '0.3.0' }
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18'
@@ -35,12 +35,6 @@ const SIMULATOR_PORT = Number(process.env.ETHOS_SIMULATOR_PORT || 8765)
 const STATUS_TIMEOUT_MS = 1000
 const COMMAND_TIMEOUT_MS = 120000
 const BOOT_TIMEOUT_MS = 60000
-const DOWNLOAD_TIMEOUT_MS = 300000
-
-const RELEASES_REPOSITORY = 'FrSkyRC/ETHOS-Feedback-Community'
-// The first releases whose simulators have the remote control exports (press, touch...)
-const MIN_VERSION = [26, 2]
-const SIMULATOR_ASSET = /^(.+)-WebSimulator\.zip$/
 
 const INSTRUCTIONS = [
   'Tools to drive a FrSky Ethos radio: the WASM simulator served by run_wasm.js --serve, or a radio',
@@ -53,8 +47,10 @@ const INSTRUCTIONS = [
   'and press(), touch(), swipe() and turnRotaryEncoder() to navigate (e.g. press PAGE to switch between',
   'the main views), enterText() to type in a text field being edited and loadModel() to load a model file.',
   'Lua errors and print() don\'t show on the screen: read them with getLog().',
-  'listFiles(), readFile(), writeFile() and deleteFile() work on the radio storage (e.g. /scripts):',
-  'call reload() after changing a Lua script. getChannelsOutputs() returns the mixer outputs.',
+  'listFiles(), readFile(), writeFile(), createDirectory() and deleteFile() work on the radio storage (e.g. /scripts):',
+  'call reload() after changing a Lua script. getChannelsOutputs() returns the mixer outputs, getControls() the switches,',
+  'trims and function switches (with since, it waits until they change; resetFunctionSwitches() turns the function',
+  'switches off). The resource ethos://controls has them too, its subscribers are notified of the changes.',
   'Change the model through its JSON: getModelJson(), edit the result, send the full document back',
   'with applyModelJson(), then call getModelJson() again to check. startMacro() runs Lua macros.',
   'The model JSON tools and startMacro() only work with the simulator. On a radio, the file tools',
@@ -117,7 +113,7 @@ const TOOLS = [
   },
   {
     name: 'press',
-    description: 'Press a key of the radio, as the user would: SYS, MDL, DISP, PAGE, RTN, ENTER, and UP, DOWN, LEFT, RIGHT on the radios which have them; a trim: T1-, T1+ ... T6+ (the number written on the radio); or a function switch: FS1, FS2... A name the radio doesn\'t have fails. duration is the press duration in ms (default 20, a short press); the radio detects a long press from 540 ms, so use e.g. 1000 for a long press. Use screenshot() afterwards to check the result.',
+    description: 'Press a key of the radio, as the user would: SYS, MDL, DISP, PAGE, RTN, ENTER, and UP, DOWN, LEFT, RIGHT on the radios which have them; a trim: T1-, T1+ ... T6+ (the number written on the radio); or a function switch: FS1, FS2... A name the radio doesn\'t have fails. duration is the press duration in ms (default 20, a short press); the radio detects a long press from 540 ms, so use e.g. 1000 for a long press. When the screen was off, it only turns it back on, as for the user, and fails with the status woke up: call it again. Use screenshot() afterwards to check the result.',
     properties: { name: string('Key, trim or function switch name'), duration: { type: 'integer', default: 20 } },
     required: ['name'],
     command: 'press',
@@ -125,7 +121,7 @@ const TOOLS = [
   },
   {
     name: 'touch',
-    description: 'Touch the screen at (x, y), in screen pixels - the same coordinates as in screenshot() images, (0, 0) being the top-left corner. duration is the touch duration in ms (default 20, a tap); from 1000 ms it is a long press (context menus). Use screenshot() afterwards to check the result.',
+    description: 'Touch the screen at (x, y), in screen pixels - the same coordinates as in screenshot() images, (0, 0) being the top-left corner. duration is the touch duration in ms (default 20, a tap); from 1000 ms it is a long press (context menus). When the screen was off, it only turns it back on, as for the user, and fails with the status woke up: call it again. Use screenshot() afterwards to check the result.',
     properties: { x: integer('Pixels from the left'), y: integer('Pixels from the top'), duration: { type: 'integer', default: 20 } },
     required: ['x', 'y'],
     command: 'touch',
@@ -182,6 +178,13 @@ const TOOLS = [
     post: true,
   },
   {
+    name: 'createDirectory',
+    description: 'Create a folder of the radio storage, e.g. /scripts/mywidget before writing its main.lua with writeFile(). Its parent folder must exist. A radio needs a firmware with the remote control protocol version 10 (getInformation() gives it).',
+    properties: { path: string('Folder, from the radio root') },
+    required: ['path'],
+    command: 'createDirectory',
+  },
+  {
     name: 'deleteFile',
     description: 'Delete a file, or an empty folder, of the radio storage. On a connected radio this deletes the user\'s file: only delete what the user asked for.',
     properties: { path: string('File or empty folder, from the radio root') },
@@ -199,6 +202,22 @@ const TOOLS = [
     description: 'Return the mixer outputs of the channels used by the model, in % (-100 to 100, CH1 first): to check the result of a model change (mixes, curves, switches...).',
     properties: {},
     command: 'getChannelsOutputs',
+  },
+  {
+    name: 'getControls',
+    description: 'Return the switches, trims and function switches, as the radio (or the simulator) sent them when they changed: switches { SA: -1 (up), 0 (middle) or 1 (down), ... } (the installed ones), trims in % (-100 to 100) in the order rudder, elevator, throttle, aileron, then T5, T6, functionSwitches { FS1: true (on) / false (off), ... } as their LEDs, and version. To wait for a change (e.g. after asking the user to move a switch), pass the version of a previous call as since: the call returns when they changed (changed: true), or after timeout seconds (changed: false).',
+    properties: {
+      since: integer('version returned by a previous call: wait until the controls change'),
+      timeout: { type: 'integer', description: 'seconds to wait for a change with since (default 30, at most 110)', default: 30 },
+    },
+    command: 'getControls',
+    args: ({ since, timeout }) => ({ since, timeout: Math.min(timeout ?? 30, 110) * 1000 }),
+  },
+  {
+    name: 'resetFunctionSwitches',
+    description: 'Turn all the function switches of the current model off, as for a new model (press() of a function switch turns it on or off, depending on the function switches mode of the model).',
+    properties: {},
+    command: 'resetFunctionSwitches',
   },
   {
     name: 'getModelJson',
@@ -271,204 +290,6 @@ async function serving(port) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-/* ---------- The simulators of the Ethos releases ---------- */
-
-function cacheDir() {
-  if (process.env.ETHOS_CACHE_DIR) {
-    return process.env.ETHOS_CACHE_DIR
-  }
-  const home = os.homedir()
-  if (process.platform === 'win32') {
-    return path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'ethos-tools')
-  }
-  if (process.platform === 'darwin') {
-    return path.join(home, 'Library', 'Caches', 'ethos-tools')
-  }
-  return path.join(process.env.XDG_CACHE_HOME || path.join(home, '.cache'), 'ethos-tools')
-}
-
-async function github(route) {
-  const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'ethos-tools' }
-  if (process.env.GITHUB_TOKEN) {
-    headers.Authorization = `Bearer ${ process.env.GITHUB_TOKEN }`
-  }
-  const res = await fetch(`https://api.github.com/repos/${ RELEASES_REPOSITORY }/${ route }`, { headers, signal: AbortSignal.timeout(30000) })
-  if (!res.ok) {
-    const limited = res.status === 403 || res.status === 429 ? ' (GitHub API rate limit? Set GITHUB_TOKEN)' : ''
-    throw Object.assign(new Error(`GitHub API ${ route }: ${ res.status } ${ res.statusText }${ limited }`), { status: res.status })
-  }
-  return res.json()
-}
-
-function isRecent(tag) {
-  const match = /^(\d+)\.(\d+)\./.exec(tag)
-  if (!match) {
-    return false // e.g. suite2.0.2, the Ethos Suite releases
-  }
-  const [major, minor] = [Number(match[1]), Number(match[2])]
-  return major > MIN_VERSION[0] || (major === MIN_VERSION[0] && minor >= MIN_VERSION[1])
-}
-
-const simulatorAssets = (release) => release.assets.filter((asset) => SIMULATOR_ASSET.test(asset.name))
-const radioName = (asset) => SIMULATOR_ASSET.exec(asset.name)[1] // e.g. X20S-FCC
-
-let releasesCache
-async function recentReleases() {
-  if (!releasesCache || Date.now() - releasesCache.time > 5 * 60000) {
-    const releases = await github('releases?per_page=30')
-    releasesCache = {
-      time: Date.now(),
-      releases: releases.filter((release) => !release.draft && isRecent(release.tag_name) && simulatorAssets(release).length),
-    }
-  }
-  return releasesCache.releases
-}
-
-async function findRelease(tag) {
-  // By default the newest prerelease (release candidate, beta), else the newest release
-  if (!tag || tag === 'latest') {
-    const releases = await recentReleases()
-    const newest = releases.find((release) => release.prerelease) || releases[0]
-    if (!newest) {
-      throw new Error(`No release ${ MIN_VERSION.join('.') } or newer with simulators in ${ RELEASES_REPOSITORY }`)
-    }
-    return newest
-  }
-  if (!isRecent(tag)) {
-    throw new Error(`Ethos ${ tag } is too old: the simulator tools need ${ MIN_VERSION.join('.') } or newer (remote control). listSimulators() lists the releases.`)
-  }
-  const known = releasesCache && releasesCache.releases.find((release) => release.tag_name === tag)
-  if (known) {
-    return known
-  }
-  try {
-    return await github(`releases/tags/${ encodeURIComponent(tag) }`)
-  } catch (err) {
-    throw err.status === 404 ? new Error(`No release ${ tag } in ${ RELEASES_REPOSITORY }. listSimulators() lists them.`) : err
-  }
-}
-
-// e.g. 'x20s fcc' or X20S_FCC: X20S-FCC, and LBT (the EU protocol in the menus): EU
-const normalizeRadio = (radio) => String(radio).trim().toUpperCase().replace(/[\s_]+/g, '-').replace(/-LBT$/, '-EU')
-
-function findAsset(release, radio) {
-  const assets = simulatorAssets(release)
-  const wanted = normalizeRadio(radio)
-  const asset = assets.find((a) => radioName(a) === wanted) || assets.find((a) => radioName(a) === `${ wanted }-FCC`)
-  if (asset) {
-    return asset
-  }
-  const board = wanted.split('-')[0]
-  const sameBoard = assets.map(radioName).filter((name) => name.split('-')[0] === board)
-  const available = sameBoard.length ? sameBoard : assets.map(radioName)
-  throw new Error(`No ${ wanted } simulator in ${ release.tag_name }. Available: ${ available.join(', ') }`)
-}
-
-// Extracts a zip file (stored or deflated entries, no zip64)
-function unzip(buffer, dir) {
-  let eocd = buffer.length - 22
-  while (eocd >= 0 && buffer.readUInt32LE(eocd) !== 0x06054b50) {
-    eocd--
-  }
-  if (eocd < 0) {
-    throw new Error('Not a zip file')
-  }
-  const root = path.resolve(dir)
-  let offset = buffer.readUInt32LE(eocd + 16)
-  for (let i = buffer.readUInt16LE(eocd + 10); i > 0; i--) {
-    if (buffer.readUInt32LE(offset) !== 0x02014b50) {
-      throw new Error('Corrupted zip file')
-    }
-    const method = buffer.readUInt16LE(offset + 10)
-    const size = buffer.readUInt32LE(offset + 20)
-    const nameLength = buffer.readUInt16LE(offset + 28)
-    const local = buffer.readUInt32LE(offset + 42)
-    const name = buffer.toString('utf8', offset + 46, offset + 46 + nameLength)
-    offset += 46 + nameLength + buffer.readUInt16LE(offset + 30) + buffer.readUInt16LE(offset + 32)
-    const dest = path.resolve(root, name)
-    if (!dest.startsWith(root + path.sep)) {
-      throw new Error(`Unexpected path in the zip file: ${ name }`)
-    }
-    if (name.endsWith('/')) {
-      fs.mkdirSync(dest, { recursive: true })
-      continue
-    }
-    const start = local + 30 + buffer.readUInt16LE(local + 26) + buffer.readUInt16LE(local + 28)
-    const data = buffer.subarray(start, start + size)
-    if (method !== 0 && method !== 8) {
-      throw new Error(`Unsupported compression method ${ method } for ${ name }`)
-    }
-    fs.mkdirSync(path.dirname(dest), { recursive: true })
-    fs.writeFileSync(dest, method === 8 ? zlib.inflateRawSync(data) : data)
-  }
-}
-
-// The simulator file: a .js next to its .wasm
-function findSimulatorJs(dir) {
-  if (!fs.existsSync(dir)) {
-    return undefined
-  }
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const file = path.join(dir, entry.name)
-    const found = entry.isDirectory()
-      ? findSimulatorJs(file)
-      : (entry.name.endsWith('.js') && fs.existsSync(file.replace(/\.js$/, '.wasm')) ? file : undefined)
-    if (found) {
-      return found
-    }
-  }
-  return undefined
-}
-
-const simulatorDir = (tag, radio) => path.join(cacheDir(), 'simulators', tag, radio)
-
-// Downloads the simulator, unless the cached one is the same asset (the
-// assets of a release candidate can be uploaded again)
-async function fetchSimulator(release, asset) {
-  const dir = simulatorDir(release.tag_name, radioName(asset))
-  const stamp = JSON.stringify({ id: asset.id, updated_at: asset.updated_at })
-  const stampFile = path.join(dir, 'asset.json')
-  if (fs.existsSync(stampFile) && fs.readFileSync(stampFile, 'utf8') === stamp) {
-    const js = findSimulatorJs(dir)
-    if (js) {
-      return { js, downloaded: false }
-    }
-  }
-  const res = await fetch(asset.browser_download_url, { headers: { 'User-Agent': 'ethos-tools' }, signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) })
-  if (!res.ok) {
-    throw new Error(`Download of ${ asset.browser_download_url } failed: ${ res.status } ${ res.statusText }`)
-  }
-  const buffer = Buffer.from(await res.arrayBuffer())
-  const tmp = `${ dir }.tmp-${ process.pid }`
-  fs.rmSync(tmp, { recursive: true, force: true })
-  try {
-    fs.mkdirSync(tmp, { recursive: true })
-    unzip(buffer, tmp)
-    fs.writeFileSync(path.join(tmp, 'asset.json'), stamp)
-    fs.rmSync(dir, { recursive: true, force: true })
-    fs.renameSync(tmp, dir)
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true })
-  }
-  const js = findSimulatorJs(dir)
-  if (!js) {
-    throw new Error(`${ asset.name } has no simulator (.js and .wasm files)`)
-  }
-  return { js, downloaded: true }
-}
-
-// Without network, a simulator already downloaded for this release
-function cachedSimulator(tag, radio) {
-  const wanted = normalizeRadio(radio)
-  for (const name of [wanted, `${ wanted }-FCC`]) {
-    const js = findSimulatorJs(simulatorDir(tag, name))
-    if (js) {
-      return { tag, radio: name, js }
-    }
-  }
-  return undefined
-}
-
 async function listSimulators({ release } = {}) {
   const releases = await recentReleases()
   const listed = await findRelease(release)
@@ -489,19 +310,7 @@ async function startSimulator({ radio, release, rootDirectory } = {}) {
   if (await serving(SIMULATOR_PORT)) {
     return { ok: false, error: `A simulator is already served on port ${ SIMULATOR_PORT }: call stopSimulator() first` }
   }
-  let build
-  try {
-    const found = await findRelease(release)
-    const asset = findAsset(found, radio)
-    const { js, downloaded } = await fetchSimulator(found, asset)
-    build = { tag: found.tag_name, prerelease: found.prerelease, radio: radioName(asset), js, downloaded }
-  } catch (err) {
-    const cached = release && release !== 'latest' && cachedSimulator(release, radio)
-    if (!cached) {
-      throw err
-    }
-    build = { ...cached, downloaded: false, warning: `Cached simulator used: ${ err.message }` }
-  }
+  const build = await resolveSimulator(radio, release)
 
   const args = [path.join(__dirname, 'run_wasm.js'), build.js, '--serve', '--port', String(SIMULATOR_PORT), '--shots-dir', path.join(os.tmpdir(), 'ethos-shots')]
   let storage = 'empty radio in memory'
@@ -607,6 +416,58 @@ async function callTool(name, args = {}) {
   return { content: [text(result)], isError: !result.ok }
 }
 
+/* ---------- The resource ethos://controls: switches, trims, function switches ---------- */
+
+const CONTROLS_URI = 'ethos://controls'
+const CONTROLS_RESOURCE = {
+  uri: CONTROLS_URI,
+  name: 'controls',
+  title: 'Switches, trims and function switches',
+  description: 'The switches, trims and function switches of the radio or the simulator served (as getControls()). Its subscribers are notified when they change.',
+  mimeType: 'application/json',
+}
+let controlsWatch // the loop notifying the subscribers, while there is one
+
+async function readControls() {
+  const target = await findTarget()
+  if (!target) {
+    throw new Error('No Ethos simulator or radio is served')
+  }
+  return get(target.port, 'getControls')
+}
+
+// Waits for the changes (getControls long poll) and notifies them, until the unsubscription
+function watchControls() {
+  if (controlsWatch) {
+    return
+  }
+  controlsWatch = { active: true }
+  const watch = controlsWatch
+  ;(async () => {
+    let version
+    while (watch.active) {
+      try {
+        const target = await findTarget()
+        if (!target) {
+          await sleep(2000)
+          continue
+        }
+        const result = await get(target.port, 'getControls', { since: version, timeout: 30000 }, 40000)
+        if (!result.ok) {
+          await sleep(2000)
+          continue
+        }
+        if (version !== undefined && result.changed && watch.active) {
+          send({ jsonrpc: '2.0', method: 'notifications/resources/updated', params: { uri: CONTROLS_URI } })
+        }
+        version = result.version
+      } catch {
+        await sleep(2000)
+      }
+    }
+  })()
+}
+
 /* ---------- MCP over stdio: one JSON-RPC message per line ---------- */
 
 function send(message) {
@@ -621,7 +482,7 @@ async function handle(message) {
     case 'initialize':
       return reply({
         protocolVersion: (params && params.protocolVersion) || DEFAULT_PROTOCOL_VERSION,
-        capabilities: { tools: {} },
+        capabilities: { tools: {}, resources: { subscribe: true } },
         serverInfo: SERVER_INFO,
         instructions: INSTRUCTIONS,
       })
@@ -635,6 +496,30 @@ async function handle(message) {
           inputSchema: { type: 'object', properties: tool.properties, ...(tool.required ? { required: tool.required } : {}) },
         })),
       })
+    case 'resources/list':
+      return reply({ resources: [CONTROLS_RESOURCE] })
+    case 'resources/read':
+      if (!params || params.uri !== CONTROLS_URI) {
+        return fail(-32002, `Resource not found: ${ params && params.uri }`)
+      }
+      try {
+        const controls = await readControls()
+        return reply({ contents: [{ uri: CONTROLS_URI, mimeType: 'application/json', text: JSON.stringify(controls) }] })
+      } catch (err) {
+        return fail(-32603, err.message)
+      }
+    case 'resources/subscribe':
+      if (!params || params.uri !== CONTROLS_URI) {
+        return fail(-32002, `Resource not found: ${ params && params.uri }`)
+      }
+      watchControls()
+      return reply({})
+    case 'resources/unsubscribe':
+      if (controlsWatch) {
+        controlsWatch.active = false
+        controlsWatch = undefined
+      }
+      return reply({})
     case 'tools/call':
       try {
         return reply(await callTool(params.name, params.arguments))

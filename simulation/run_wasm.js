@@ -40,6 +40,7 @@ const LONG_TOUCH_MS = 1000
 const STATUS = {
   0: 'success', [-1]: 'unsupported', [-2]: 'refused', [-3]: 'invalid argument',
   [-4]: 'I/O error', [-5]: 'busy (a macro is running)', [-6]: 'timeout',
+  [-7]: 'woke up (the screen was off: the input only turned it back on, send it again)',
 }
 
 const DISPLAYS = ['MAIN', 'TOP', 'GLASSES']
@@ -63,9 +64,13 @@ const CLIENT_COMMANDS = {
   listFiles: ['path'],
   readFile: ['path', 'out'],
   writeFile: ['path', 'src'],
+  createDirectory: ['path'],
   deleteFile: ['path'],
   reload: ['what'],
   getChannelsOutputs: [],
+  getTrims: [],
+  getControls: ['since', 'timeout'],
+  resetFunctionSwitches: [],
   getModelJson: ['out'],
   applyModelJson: ['src'],
   wait: ['ms'],
@@ -76,6 +81,7 @@ const FS_ERRORS = {
   ENOENT: 'No such file or folder (a written file\'s folder must exist)',
   ENOTEMPTY: 'The folder is not empty',
   EISDIR: 'This is a folder',
+  EEXIST: 'It already exists',
   ENOTDIR: 'This is not a folder',
 }
 
@@ -138,6 +144,11 @@ function printUsage() {
     'Usage:',
     '  node run_wasm.js <simulator.js> [--root-directory DIR] [--macro path[.lua]] [--macro-timeout MS]',
     '  node run_wasm.js <simulator.js> --serve [--port N] [--shots-dir DIR] [--root-directory DIR] [--macro ...]',
+    '  node run_wasm.js --radio RADIO [--release TAG] ... (instead of <simulator.js>)',
+    '      The simulator of RADIO (X20S, X20S-FLEX, X18-EU...) of a release on GitHub (TAG, the latest',
+    '      by default), downloaded once in a cache folder (ETHOS_CACHE_DIR, see simulators.js)',
+    '  node run_wasm.js --list-simulators [--radio PATTERN] [--release TAG]',
+    '      The release and its radios (PATTERN: X20*, X20S-*..., FCC by default), as JSON',
     '  node run_wasm.js <command> [args] [--port N]',
     '',
     'Commands (to a --serve instance):',
@@ -145,8 +156,9 @@ function printUsage() {
     '  press NAME [ms] | touch X Y [ms] | swipe X1 Y1 X2 Y2 | turnRotaryEncoder STEPS',
     '  enterText TEXT | loadModel PATH | resetBacklightTimer',
     '  setSwitch I V | setAnalog I V | startMacro PATH [timeoutMs]',
-    '  getInformation | getLog [since] | getChannelsOutputs | reload [SCRIPTS|ALL]',
-    '  listFiles [PATH] | readFile PATH [out] | writeFile PATH SRC | deleteFile PATH',
+    '  getInformation | getLog [since] | getChannelsOutputs | getTrims | getControls [since] [timeoutMs] | resetFunctionSwitches',
+    '  reload [SCRIPTS|ALL]',
+    '  listFiles [PATH] | readFile PATH [out] | writeFile PATH SRC | createDirectory PATH | deleteFile PATH',
     '  getModelJson [out.json] | applyModelJson SRC.json',
     '  wait MS | quit',
     '',
@@ -175,9 +187,12 @@ function parseArgs(argv) {
     else if (a === '--serve') opts.serve = true
     else if (a === '--port') opts.port = parseInt(argv[++i], 10)
     else if (a === '--shots-dir') opts.shotsDir = path.resolve(argv[++i])
+    else if (a === '--radio') opts.radio = argv[++i]
+    else if (a === '--release') opts.release = argv[++i]
+    else if (a === '--list-simulators') opts.listSimulators = true
     else positional.push(a)
   }
-  if (positional.length < 1) {
+  if (positional.length < 1 && !opts.radio && !opts.listSimulators) {
     printUsage()
     process.exit(2)
   }
@@ -301,6 +316,8 @@ class Session {
     this.rfProtocol = undefined // from the build name (X20S_FCC)
     this.modelJson = undefined
     this.modelJsonVersion = 0 // incremented on each JSON sent by the firmware
+    this.controlsVersion = 0 // incremented when the switches, trims or function switches change
+    this.controlsWaiters = [] // getControls() waiting for a change
     this.switchesConfig = 0
     this.switchesPosition = []
     this.trimsValue = []
@@ -331,12 +348,21 @@ class Session {
       updateCanvas: frame('MAIN'),
       updateCanvasTop: frame('TOP'),
       updateCanvasGlasses: frame('GLASSES'),
-      setSwitchesConfig: (config) => { this.switchesConfig = config },
+      setSwitchesConfig: (config) => {
+        this.switchesConfig = config
+        this.controlsChanged()
+      },
       setSwitchesPosition: (ptr, count) => {
         this.switchesPosition = Array.from(new Int8Array(this.Module.HEAP8.buffer, ptr, count))
+        this.controlsChanged()
       },
       setTrimsValue: (ptr, count) => {
         this.trimsValue = Array.from(new Int16Array(this.Module.HEAP16.buffer, ptr, count), (v) => Math.round(v * 100 / 256))
+        this.controlsChanged()
+      },
+      setFunctionSwitchesState: (ptr, count) => {
+        this.functionSwitchesState = Array.from(new Int8Array(this.Module.HEAP8.buffer, ptr, count), Boolean)
+        this.controlsChanged()
       },
       setModelJson: (json) => {
         this.modelJson = json
@@ -435,6 +461,12 @@ class Session {
     return { ok: true, path: radioPath, size: data.length }
   }
 
+  // Its parent must exist, as on the radio
+  createDirectory(radioPath) {
+    this.Module.FS.mkdir(this.fsPath(radioPath))
+    return { ok: true, path: radioPath }
+  }
+
   deleteFile(radioPath) {
     const { FS } = this.Module
     const fsPath = this.fsPath(radioPath)
@@ -510,11 +542,41 @@ class Session {
     return { ok: true, outputs }
   }
 
+  // The switches, trims and function switches, sent by the firmware when they change (as the
+  // EVENT_CONTROLS of a radio): switches -1 up, 0 middle, 1 down (the ones installed), trims in %
+  controls() {
+    const switches = {}
+    ;(this.switchesPosition || []).forEach((position, i) => {
+      if (this.switchesConfig === undefined || ((this.switchesConfig >>> (2 * i)) & 3)) {
+        switches[`S${ String.fromCharCode(65 + i) }`] = Math.sign(position)
+      }
+    })
+    const functionSwitches = Object.fromEntries((this.functionSwitchesState || []).map((on, i) => [`FS${ i + 1 }`, on]))
+    return { switches, trims: this.trimsValue || [], functionSwitches }
+  }
+
+  controlsChanged() {
+    this.controlsVersion++
+    for (const resolve of this.controlsWaiters.splice(0)) resolve()
+  }
+
+  // The controls; with since (a version), once they changed (timeoutMs at most)
+  async getControls(since, timeoutMs) {
+    if (since !== undefined && since === this.controlsVersion) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, timeoutMs)
+        this.controlsWaiters.push(() => { clearTimeout(timer); resolve() })
+      })
+    }
+    return { ok: true, ...this.controls(), version: this.controlsVersion, changed: since === undefined || since !== this.controlsVersion }
+  }
+
   getInformation() {
     const displays = Object.fromEntries(Object.entries(this.frames).map(([display, { width, height }]) => [display, { width, height }]))
     return {
       ok: true, target: 'simulator', ...this.firmware, rfProtocol: this.rfProtocol,
       displays, drives: [{ name: 'Local', path: '/' }], remoteControl: this.hasExport('touch'),
+      controls: this.controls(),
     }
   }
 
@@ -607,9 +669,13 @@ class Session {
       case 'listFiles': return this.listFiles(q.path || '/')
       case 'readFile': return this.readFile(q.path, q.out)
       case 'writeFile': return this.writeFile(q.path, q)
+      case 'createDirectory': return this.createDirectory(q.path)
       case 'deleteFile': return this.deleteFile(q.path)
       case 'reload': status = this.reload((q.what || 'SCRIPTS').toUpperCase()); break
       case 'getChannelsOutputs': return this.getChannelsOutputs()
+      case 'getTrims': return { ok: true, trims: this.controls().trims }
+      case 'getControls': return this.getControls(q.since === undefined || q.since === '' ? undefined : Number(q.since), num('timeout', 30000))
+      case 'resetFunctionSwitches': status = await this.remote('resetFunctionSwitches', [], []); break
       case 'getModelJson': {
         const result = await this.getModelJson()
         if (result.ok && q.out) {
@@ -678,14 +744,18 @@ async function run(opts) {
         return
       }
     }
-    // Commands run one at a time, in arrival order
-    queue = queue.then(() => session.handle(cmd, q, opts))
+    // Commands run one at a time, in arrival order. getControls only reads the state the
+    // firmware sent: it can wait for a change without blocking the other commands
+    const run = (cmd === 'getControls' ? Promise.resolve() : queue).then(() => session.handle(cmd, q, opts))
       // The errors of the Emscripten file system have an errno, a code (ENOENT...) but not always a message
       .catch((err) => ({ ok: false, error: FS_ERRORS[err && err.code] || String(err && (err.code || err.message || (err.errno !== undefined && `errno ${ err.errno }`)) || err) }))
       .then((result) => {
         res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(result))
       })
+    if (cmd !== 'getControls') {
+      queue = run // never rejected: a command which fails doesn't stop the next ones
+    }
   }).listen(opts.port, '127.0.0.1', () => {
     console.log(`[run_wasm] serving on http://127.0.0.1:${ opts.port }`)
   })
@@ -711,10 +781,31 @@ async function client(cmd, args, port) {
 async function main() {
   const opts = parseArgs(process.argv.slice(2))
   const [first, ...rest] = opts.positional
-  if (Object.prototype.hasOwnProperty.call(CLIENT_COMMANDS, first)) {
+  if (opts.listSimulators) {
+    const simulators = require('./simulators')
+    try {
+      const release = await simulators.findRelease(opts.release)
+      const radios = opts.radio ? simulators.matchRadios(release, opts.radio) : simulators.simulatorAssets(release).map(simulators.radioName)
+      process.stdout.write(JSON.stringify({ ok: true, release: release.tag_name, prerelease: release.prerelease, radios }) + '\n')
+    } catch (err) {
+      process.stdout.write(JSON.stringify({ ok: false, error: err.message }) + '\n')
+      process.exit(1)
+    }
+  } else if (Object.prototype.hasOwnProperty.call(CLIENT_COMMANDS, first)) {
     await client(first, rest, opts.port)
   } else {
-    opts.jsPath = path.resolve(first)
+    if (opts.radio) {
+      // The simulator of a release, downloaded unless it is in the cache
+      const onDownload = (release, asset) => console.log(`[run_wasm] downloading ${ asset.name } of ${ release.tag_name } (${ Math.round(asset.size / 1048576) } MB)...`)
+      const build = await require('./simulators').resolveSimulator(opts.radio, opts.release, onDownload).catch((err) => {
+        process.stderr.write(`[run_wasm] ${ err.message }\n`)
+        process.exit(1)
+      })
+      console.log(`[run_wasm] ${ build.radio } ${ build.tag }${ build.downloaded ? ' downloaded' : '' }: ${ build.js }${ build.warning ? ` (${ build.warning })` : '' }`)
+      opts.jsPath = build.js
+    } else {
+      opts.jsPath = path.resolve(first)
+    }
     await run(opts)
   }
 }

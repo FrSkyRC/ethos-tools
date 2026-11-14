@@ -40,7 +40,7 @@ The radio is never started here: run [`radio_remote.py --serve`](radio_remote.md
 | `startSimulator(radio, release?, rootDirectory?)` | – | – | Download (once) and start the simulator of a radio |
 | `stopSimulator()` | ✔ | – | Stop the simulator |
 | `getInformation()` | ✔ | ✔ | Target, board, firmware version, RF protocol, display sizes, drives; for a radio its state (flight mode, RF active, backlight on) |
-| `getLog(since?)` | ✔ | ✔ | Log lines (Lua `print()` and errors): the last 50, or the ones since `next` of the previous call |
+| `getLog(since?)` | ✔ | ✔ | Log lines (Lua `print()` and errors): the last 50, or the ones since `next` of the previous call, 200 at most (`more` is then true: call again with `next`) |
 | `screenshot(display)` | ✔ | ✔ | PNG of `MAIN`, `TOP` or `GLASSES` |
 | `resetBacklightTimer()` | ✔ | ✔ | Turn the screen back on |
 | `press(name, duration)` | ✔ | ✔ | Key (`ENTER`, `RTN`, `SYS`...), trim (`T1+`...) or function switch (`FS1`...); from 540 ms a long press |

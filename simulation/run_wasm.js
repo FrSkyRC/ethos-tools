@@ -90,6 +90,7 @@ const LOCAL_FILE_ARGUMENTS = ['out', 'src']
 
 // Numbered lines of the system log (Lua print() and errors): getLog returns
 // next, to pass back as since to only get the lines added meanwhile
+const LOG_LINES_PER_CALL = 200
 class LogBuffer {
   constructor(capacity = 1000) {
     this.capacity = capacity
@@ -114,17 +115,17 @@ class LogBuffer {
     return this.first + this.lines.length
   }
 
-  // Without since (or with a number beyond next), the last 50 lines; at most 200 lines
+  // Without since (or with a number beyond next), the last 50 lines. With since, the
+  // lines from it on, LOG_LINES_PER_CALL at most: next is then the line after them and
+  // more is true, so the following call carries on and no line is skipped. truncated
+  // is true only when lines since `since` were already dropped from the buffer.
   get(since) {
-    const next = this.next
-    let start = since === undefined || since > next ? next - 50 : since
-    let truncated = since !== undefined && start < this.first
+    const end = this.next
+    let start = since === undefined || since > end ? end - 50 : since
+    const truncated = since !== undefined && start < this.first
     start = Math.max(start, this.first)
-    if (next - start > 200) {
-      start = next - 200
-      truncated = since !== undefined
-    }
-    return { lines: this.lines.slice(start - this.first), next, truncated }
+    const next = Math.min(end, start + LOG_LINES_PER_CALL)
+    return { lines: this.lines.slice(start - this.first, next - this.first), next, truncated, more: next < end }
   }
 }
 

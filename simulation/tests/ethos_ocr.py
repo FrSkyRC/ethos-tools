@@ -107,6 +107,14 @@ def has_color(png_path, box, color, tolerance=30, ratio=0.1):
     return mask.size > 0 and np.count_nonzero(mask) >= ratio * mask.size
 
 
+def brightness(png_path, box):
+    """The brightest pixel of box (x, y, w, h), 0 to 255: its highest channel, so a lit
+    text counts the same white or orange."""
+    x, y, w, h = box
+    image = load(png_path)[y:y + h, x:x + w]
+    return int(image.max()) if image.size else 0
+
+
 def buttons(png_path, top=0):
     """(x, y, w, h) of the buttons of a screenshot (their frame), below top (the title bar)."""
     import cv2  # pylint: disable=import-outside-toplevel

@@ -407,13 +407,20 @@ class LogWatcher:
         self.position = 0  # lines already searched by wait_for
 
     def poll(self):
-        body = self.remote.call('getLog', since=self.next)
-        if body.get('truncated'):
-            print('      warning: some log lines were lost, poll more often', file=sys.stderr)
-        self.lines += body['lines']
-        self.next = body['next']
+        """Reads the lines added since the previous poll: getLog gives 200 at most per
+        call, and says with more that others follow."""
+        lines = []
+        while True:
+            body = self.remote.call('getLog', since=self.next)
+            if body.get('truncated'):
+                print('      warning: some log lines were lost, poll more often', file=sys.stderr)
+            lines += body['lines']
+            self.next = body['next']
+            if not body.get('more'):
+                break
+        self.lines += lines
         if self.fail_on:
-            for line in body['lines']:
+            for line in lines:
                 if self.fail_on.search(line):
                     raise TestFailure(f'Lua error: {line.strip()}')
 

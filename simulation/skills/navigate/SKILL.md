@@ -89,7 +89,7 @@ Name screenshots after what they show (`system-menu.png`, `after-ok.png`) so the
 | `setAnalog I V` | Stick / pot / slider I value, -100 to 100 |
 | `startMacro PATH [timeoutMs]` | Runs a Lua macro (e.g. `USER:/macros/x.lua`) to completion |
 | `getInformation` | Board, firmware version, display sizes |
-| `getLog [since]` | Simulator log: Lua errors and `print` show up here. The result has `next`: `getLog NEXT` then only returns the newer lines |
+| `getLog [since]` | Simulator log: Lua errors and `print` show up here. The result has `next`: `getLog NEXT` then only returns the newer lines, 200 at most per call (`more` is then true: call again with the new `next`) |
 | `listFiles [PATH]`, `readFile PATH [out]`, `writeFile PATH SRC`, `createDirectory PATH`, `deleteFile PATH` | Files of the radio folder, paths from its root. In Git Bash, without the leading `/` (`scripts/main.lua`) |
 | `reload [SCRIPTS\|ALL]` | Reload the Lua scripts after changing one, or everything |
 | `getChannelsOutputs` | Mixer outputs in %, to check a model change |

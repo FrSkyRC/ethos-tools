@@ -384,14 +384,20 @@ class EthosBaseTest:
         self.fail(f'No "{text}" on the page')
 
     def toggle_is_on(self, label):
-        """The state of the OFF / ON switch on the line of label: its ON is orange when on."""
+        """The state of the OFF / ON switch on the line of label, and its ON text. The text
+        of the state is the bright one, the other is dimmed: ON is white when on, and orange
+        only when the switch has the focus, as OFF is when off with the focus."""
         found = self.find_text(label)
         line = [t for t in self.texts if t.x > found.x + found.w and abs(t.center[1] - found.center[1]) < found.h]
         on = next((t for t in line if t.text.strip().upper() == 'ON'), None)
         if on is None:
             self.fail(f'No OFF / ON switch on the "{label}" line')
-        return ethos_ocr.has_color(os.path.join(self.remote.shots_dir, 'ocr.png'), (on.x, on.y, on.w, on.h),
-                                   ethos_ocr.FOCUS_COLOR), on
+        screen = os.path.join(self.remote.shots_dir, 'ocr.png')
+        off = next((t for t in line if t.text.strip().upper() == 'OFF'), None)
+        if off is None:  # the OFF text was not read: on with the focus is still told by its color
+            return ethos_ocr.has_color(screen, (on.x, on.y, on.w, on.h), ethos_ocr.FOCUS_COLOR), on
+        return (ethos_ocr.brightness(screen, (on.x, on.y, on.w, on.h))
+                > ethos_ocr.brightness(screen, (off.x, off.y, off.w, off.h))), on
 
     def set_toggle(self, label, on=True):
         """Sets the OFF / ON switch on the line of label, touched only when it is not in this state."""

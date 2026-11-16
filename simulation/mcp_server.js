@@ -94,7 +94,7 @@ const TOOLS = [
   },
   {
     name: 'getLog',
-    description: 'Return the system log lines: Lua print() output and Lua errors, which are not shown on the screen. Without since, the last 50 lines. The result has next: pass it as since on the following call to only get the lines added meanwhile (e.g. call getLog() before an action, then getLog(since=next) after it). truncated is true when lines were skipped (200 lines at most per call).',
+    description: 'Return the system log lines: Lua print() output and Lua errors, which are not shown on the screen. Without since, the last 50 lines. The result has next: pass it as since on the following call to only get the lines added meanwhile (e.g. call getLog() before an action, then getLog(since=next) after it). A call returns 200 lines at most: when more is true, call again with next to get the following ones. truncated is true when lines since `since` were lost (the log keeps its last 1000 lines).',
     properties: { since: integer('Number returned as next by the previous call') },
     command: 'getLog',
   },

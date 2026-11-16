@@ -85,7 +85,7 @@ With `--serve`, the simulator keeps running behind a small HTTP server on `127.0
 | `setSwitch I V`, `setAnalog I V` | Switches (-100 / 0 / 100), sticks, pots and sliders (-100 to 100): simulator only |
 | `startMacro PATH [timeoutMs]` | Run a Lua macro to completion |
 | `getInformation` | Board, firmware version, RF protocol, display sizes, drives |
-| `getLog [since]` | Log lines (Lua `print()` and errors): the last 50, or the ones since `next` returned by the previous call |
+| `getLog [since]` | Log lines (Lua `print()` and errors): the last 50, or the ones since `next` returned by the previous call, 200 at most (`more` is then true: call again with `next`) |
 | `listFiles [PATH]`, `readFile PATH [out]`, `writeFile PATH SRC`, `createDirectory PATH`, `deleteFile PATH` | Files of the radio storage (`--root-directory`), radio paths from its root; `readFile` returns the text (or base64) when no `out` is given |
 | `reload [SCRIPTS\|ALL]` | Reload the Lua scripts, or everything |
 | `getChannelsOutputs` | Mixer outputs, in % |

@@ -55,7 +55,7 @@ python radio_remote.py quit
 | `loadModel PATH` | Load a model file |
 | `resetBacklightTimer` | Turn the screen back on |
 | `getInformation` | Board, firmware, RF protocol, protocol version, display sizes (once a screenshot was taken), drives, state (flight mode, RF active, backlight on) |
-| `getLog [since]` | Radio log lines: the last 50, or the ones since `next` returned by the previous call |
+| `getLog [since]` | Radio log lines: the last 50, or the ones since `next` returned by the previous call, 200 at most (`more` is then true: call again with `next`) |
 | `listFiles [PATH]` | List a folder of the radio's storage (`/`, `/models`, `/scripts`, `SD:/`...) |
 | `readFile PATH [out]` | Read a file: its text (or base64) in the result, or saved to `out` |
 | `writeFile PATH SRC` | Write the local file `SRC` to `PATH` on the radio (over HTTP also `text` or `base64` in a `POST` body) |

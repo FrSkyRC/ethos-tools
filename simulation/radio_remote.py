@@ -113,6 +113,7 @@ class LogBuffer:
     next, to pass back as since to only get the lines added meanwhile."""
 
     ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+    LINES_PER_CALL = 200
 
     def __init__(self, capacity=1000):
         self.capacity = capacity
@@ -132,16 +133,18 @@ class LogBuffer:
                 self.first += dropped
 
     def get(self, since=None):
-        """Without since (or with a number beyond next), the last 50 lines; at most 200 lines."""
+        """Without since (or with a number beyond next), the last 50 lines. With since, the
+        lines from it on, LINES_PER_CALL at most: next is then the line after them and more
+        is true, so the following call carries on and no line is skipped. truncated is true
+        only when lines since `since` were already dropped from the buffer."""
         with self.lock:
-            nxt = self.first + len(self.lines)
-            start = nxt - 50 if since is None or since > nxt else since
+            end = self.first + len(self.lines)
+            start = end - 50 if since is None or since > end else since
             truncated = since is not None and start < self.first
             start = max(start, self.first)
-            if nxt - start > 200:
-                start = nxt - 200
-                truncated = since is not None
-            return {'lines': self.lines[start - self.first:], 'next': nxt, 'truncated': truncated}
+            nxt = min(end, start + self.LINES_PER_CALL)
+            return {'lines': self.lines[start - self.first:nxt - self.first], 'next': nxt,
+                    'truncated': truncated, 'more': nxt < end}
 
 
 def file_content(data):
